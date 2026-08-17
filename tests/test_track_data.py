@@ -29,15 +29,6 @@ def segment_lengths(points: np.ndarray) -> np.ndarray:
     return np.hypot(*np.diff(closed, axis=0).T)
 
 
-def corner_radii(points: np.ndarray, arm: int = 5) -> np.ndarray:
-    """Radius of curvature at each point, from the circle through a triple."""
-    before, after = np.roll(points, arm, axis=0), np.roll(points, -arm, axis=0)
-    u, v = points - before, after - points
-    sides = np.hypot(*u.T) * np.hypot(*v.T) * np.hypot(*(after - before).T)
-    area2 = np.abs(u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0])
-    return np.where(area2 > 1e-9, sides / np.maximum(area2, 1e-9), np.inf)
-
-
 class TestCenterline:
     def test_is_evenly_spaced(self, centerline):
         """Checkpoint validation assumes progress is linear in distance driven."""
@@ -63,8 +54,9 @@ class TestCenterline:
 
 
 class TestCircuitIsPlayable:
-    def test_every_corner_is_a_sweeper(self, centerline):
-        tightest = float(corner_radii(centerline).min())
+    def test_every_corner_is_a_sweeper(self):
+        world = build_world(track_data.DESIGN_WIDTH, track_data.DESIGN_HEIGHT)
+        tightest = float(world.track.corner_radii().min())
         needed_lock = (config.TOP_SPEED / config.TURN_RATE) / tightest
         assert needed_lock <= COMFORTABLE_LOCK
 

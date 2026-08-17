@@ -15,12 +15,14 @@ trigger volumes — those all fall out of `locate()`.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 import numpy as np
 
 Point = tuple[float, float]
+# Centrelines arrive both hand-written as tuples and generated as arrays.
+Centerline = Sequence[Point] | np.ndarray
 
 # Two centreline points closer than this are treated as the same point. Guards
 # the zero-length segments that would otherwise divide by zero.
@@ -57,7 +59,7 @@ class Track:
     first point at the end.
     """
 
-    def __init__(self, centerline: Sequence[Point], width: float) -> None:
+    def __init__(self, centerline: Centerline, width: float) -> None:
         if width <= 0.0:
             raise ValueError("width must be positive")
 
@@ -95,6 +97,29 @@ class Track:
         to check when authoring a circuit.
         """
         return self._total_length
+
+    def corner_radii(self, arm: float = 40.0) -> np.ndarray:
+        """Radius of curvature at every centreline point, in pixels.
+
+        Measured as the circle through three points spaced ``arm`` apart:
+        shorter arms pick up the noise left by resampling, longer ones smooth a
+        real corner away. Straights come back as infinity.
+
+        Used to check corners are open enough to be sweepers, and to decide
+        where the circuit is turning hard enough to deserve kerbs.
+        """
+        points = self._starts
+        spacing = self._total_length / len(points)
+        step = max(1, round(arm / spacing))
+
+        before = np.roll(points, step, axis=0)
+        after = np.roll(points, -step, axis=0)
+        into, out = points - before, after - points
+
+        sides = (np.hypot(*into.T) * np.hypot(*out.T) * np.hypot(*(after - before).T))
+        # Twice the triangle's area, as the z of the cross product of two sides.
+        area2 = np.abs(into[:, 0] * out[:, 1] - into[:, 1] * out[:, 0])
+        return np.where(area2 > 1e-9, sides / np.maximum(area2, 1e-9), np.inf)
 
     def locate(self, x: float, y: float) -> TrackPoint:
         """Project a world position onto the centreline.
@@ -144,7 +169,7 @@ class Track:
         return index, float(t[index]), float(distances[index])
 
 
-def _drop_repeated_points(centerline: Sequence[Point]) -> np.ndarray:
+def _drop_repeated_points(centerline: Centerline) -> np.ndarray:
     """Remove consecutive duplicates, including a repeated closing point.
 
     Hand-authored centrelines pick up duplicate vertices easily, and each one

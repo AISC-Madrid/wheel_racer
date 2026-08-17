@@ -40,22 +40,6 @@ NEIGHBOUR_EXCLUSION_PX = 250.0
 COMFORTABLE_LOCK = 0.60
 
 
-def corner_radii(points: np.ndarray, spacing: float) -> np.ndarray:
-    """Radius of curvature at every point, via the circle through a triple."""
-    arm = max(1, round(CURVATURE_ARM_PX / spacing))
-    before = np.roll(points, arm, axis=0)
-    after = np.roll(points, -arm, axis=0)
-
-    a = np.hypot(*(points - before).T)
-    b = np.hypot(*(after - points).T)
-    c = np.hypot(*(after - before).T)
-    # Twice the triangle area, via the z of the cross product of two sides.
-    u = points - before
-    v = after - points
-    area2 = np.abs(u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0])
-    return np.where(area2 > 1e-9, a * b * c / np.maximum(area2, 1e-9), np.inf)
-
-
 def closest_approach(points: np.ndarray, spacing: float) -> tuple[float, int, int]:
     """Nearest distance between two stretches of track that are not neighbours."""
     deltas = points[:, None, :] - points[None, :, :]
@@ -91,7 +75,9 @@ def main() -> None:
     print( "                 first-timers come in well over this; the quick ones under")
 
     print()
-    radii = corner_radii(points, spacing)
+    # Track geometry is in world pixels; everything printed here is in the
+    # design pixels the circuit was authored in.
+    radii = world.track.corner_radii(CURVATURE_ARM_PX * world.scale) / world.scale
     full_lock_radius = config.TOP_SPEED / config.TURN_RATE
     tightest = float(radii.min())
     lock = full_lock_radius / tightest
