@@ -40,61 +40,23 @@ STEER_SMOOTHING_TAU = 0.08
 STEER_INVERT = False
 
 # --- Car --------------------------------------------------------------------
-# Pure arcade physics: no inertia, no drift. The car auto-throttles toward a
-# target speed that depends only on whether it is on tarmac.
-
-# Speed on tarmac, in design pixels per second — `world.py` scales it to the
-# display. Set to put a LAPS_PER_RUN run near TARGET_RUN_SECONDS on the authored
-# circuit; run tools/inspect_track.py after changing either.
 TOP_SPEED = 185.0
-
-# Speed on grass. The only penalty in the game. Kept at about 40% of TOP_SPEED:
-# slow enough to hurt, fast enough that recovering never feels like being stuck.
-GRASS_SPEED = 72.0
-
-# How fast speed eases toward its target, px/s². This is the main skill-gradient
-# dial: high = snappy recovery and a welcoming game, low = an excursion really
-# costs you and the leaderboard spreads out. Start forgiving for the booth.
-# At 240, recovering from grass to full speed takes (185-72)/240 ≈ 0.5s.
+GRASS_SPEED = 100.0
 ACCEL = 240.0
-
-# Steering authority, in radians per second at full lock and full speed. Turn
-# radius at full lock is TOP_SPEED / TURN_RATE, so ~88px against a tightest
-# corner radius of ~186px — the sweepers sit under half of full lock, leaving
-# the rest as headroom for corrections. Lower this if the car feels twitchy.
-TURN_RATE = 2.1
-
-# How much of the steering goes away as the car slows down. 1.0 keeps the turn
-# radius constant at every speed, which sounds right but leaves the car barely
-# able to turn on grass — exactly when the player most needs to point it
-# somewhere. 0.5 lets a slow car turn more sharply, so rejoining the track is a
-# matter of steering back on rather than of waiting. See car.py.
+# Steering authority, in radians per second at full lock and full speed.
+TURN_RATE = 1.7
+# How much of the steering goes away as the car slows down. 
 TURN_SPEED_RESPONSE = 0.5
 
 # --- Track ------------------------------------------------------------------
-
-# Full tarmac width. The car is on-track while its centre is within half of this
-# of the centreline. Narrower than PROJECT.md's 140 because the whole circuit is
-# folded into one screen and a wide band would overlap itself.
 TRACK_WIDTH = 62.0
 
 # --- The run ----------------------------------------------------------------
-
-# Laps in one attempt. Two, because a single lap long enough to fill 30 seconds
-# will not fit on one screen without corners too tight to be sweepers. Two laps
-# of a 15s circuit keeps arcade speed and gives the first lap away as a
-# recognition lap — nobody's first sight of a corner is also their only one.
 LAPS_PER_RUN = 2
-
-# What one attempt should come to, start line to chequered flag. Booth
-# throughput lives or dies on this number.
 TARGET_RUN_SECONDS = 30.0
 
 # --- Lap timing -------------------------------------------------------------
-
-# Ordered gates a lap must pass through, evenly spaced around the circuit.
-# Stops anyone cutting across the infield for a fake time.
-NUM_CHECKPOINTS = 4
+NUM_CHECKPOINT_GATES = 5
 
 # Largest single-frame change in lap progress that counts as "driven". A car at
 # TOP_SPEED on a ~4500px circuit advances about 0.0006 per frame, so even a bad
@@ -103,17 +65,39 @@ NUM_CHECKPOINTS = 4
 LAP_MAX_PROGRESS_STEP = 0.05
 
 # --- Recovery ---------------------------------------------------------------
-
-# Snap back to the track after this long fully off it. Nobody should be able to
-# get stranded in a corner of the screen with a queue watching.
 RESPAWN_AFTER_OFF_TRACK_S = 3.0
-
-# Snap back after this long pointing the wrong way round the circuit.
 RESPAWN_AFTER_BACKWARDS_S = 1.5
 
 # --- Booth flow -------------------------------------------------------------
-
-# Abandon the lap and return to the attract screen after this long with fewer
-# than two wrists visible. Without it, a player who walks away mid-lap leaves
-# the car circling on the last held steering value forever.
 ABANDON_AFTER_HANDS_LOST_S = 6.0
+ATTRACT_HOLD_SECONDS = 1.2
+ATTRACT_LEVEL_TOLERANCE = 0.35
+
+# --- Camera -----------------------------------------------------------------
+
+CAMERA_INDEX = 0
+
+# Capture resolution. Bigger costs framerate and buys very little: the game
+# reads one landmark per hand, and MediaPipe downsamples internally anyway.
+CAMERA_CAPTURE_SIZE = (640, 480)
+
+
+CAMERA_MIRROR = True
+
+# 0 is the light hand model, 1 the heavy one. The heavy model is better at
+# finger detail, which this game never looks at, and worse at framerate, which
+# it does. Raise only if wrists are being lost outdoors.
+CAMERA_MODEL_COMPLEXITY = 0
+
+# Raise detection confidence if the busy outdoor background produces phantom
+# hands; lower it if real hands are missed in awkward light.
+CAMERA_DETECTION_CONFIDENCE = 0.6
+CAMERA_TRACKING_CONFIDENCE = 0.5
+
+# Width of the picture-in-picture preview, in design pixels.
+CAMERA_PREVIEW_WIDTH = 240
+
+# Treat the last sample as no longer valid after this long. Covers the camera
+# stalling or being unplugged mid-run, which otherwise looks like a player
+# holding perfectly still.
+CAMERA_STALE_AFTER_S = 0.4
