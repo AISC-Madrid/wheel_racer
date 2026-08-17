@@ -17,6 +17,7 @@ looks bigger but plays exactly the same.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from . import config, track_data
@@ -35,13 +36,31 @@ class World:
 
     @property
     def predicted_lap_seconds(self) -> float:
-        """Lap time for a car that keeps the racing line perfectly.
+        """Lap time for a car driven exactly along the centreline.
 
-        Real times come in slower — a player is never exactly on the centreline
-        and every excursion costs. Treat this as the floor, and the number to
-        aim at when setting `config.TOP_SPEED`.
+        A reference, not a bound. A good driver comes in *under* it, because
+        the centreline is not the shortest way round: clipping the inside of
+        every corner saves close to `2 * pi * half_width` over a lap, which on
+        this circuit is about 7%. A nervous one comes in well over it. Use this
+        as the number to aim `config.TOP_SPEED` at, then check real times.
         """
         return self.track.total_length / self.tuning.top_speed
+
+    @property
+    def predicted_run_seconds(self) -> float:
+        """Centreline reference time for a whole attempt."""
+        return self.predicted_lap_seconds * config.LAPS_PER_RUN
+
+    @property
+    def ideal_lap_seconds(self) -> float:
+        """Rough best possible lap, hugging the inside of every corner.
+
+        Approximate: the inside line only shortens the lap where the circuit
+        actually turns, and this circuit turns both ways, so treat it as a
+        soft lower bound on what the leaderboard will ever see.
+        """
+        inside_line = self.track.total_length - 2.0 * math.pi * (self.track.width / 2.0)
+        return inside_line / self.tuning.top_speed
 
 
 def build_world(

@@ -43,22 +43,25 @@ STEER_INVERT = False
 # Pure arcade physics: no inertia, no drift. The car auto-throttles toward a
 # target speed that depends only on whether it is on tarmac.
 
-# Speed on tarmac. Set this *after* the track is authored, so that one lap comes
-# out near TARGET_LAP_SECONDS.
-TOP_SPEED = 155.0
+# Speed on tarmac, in design pixels per second — `world.py` scales it to the
+# display. Set to put a LAPS_PER_RUN run near TARGET_RUN_SECONDS on the authored
+# circuit; run tools/inspect_track.py after changing either.
+TOP_SPEED = 185.0
 
-# Speed on grass. The only penalty in the game.
-GRASS_SPEED = 60.0
+# Speed on grass. The only penalty in the game. Kept at about 40% of TOP_SPEED:
+# slow enough to hurt, fast enough that recovering never feels like being stuck.
+GRASS_SPEED = 72.0
 
 # How fast speed eases toward its target, px/s². This is the main skill-gradient
 # dial: high = snappy recovery and a welcoming game, low = an excursion really
 # costs you and the leaderboard spreads out. Start forgiving for the booth.
-# At 200, recovering from grass to full speed takes (155-60)/200 ≈ 0.5s.
-ACCEL = 200.0
+# At 240, recovering from grass to full speed takes (185-72)/240 ≈ 0.5s.
+ACCEL = 240.0
 
 # Steering authority. Turn radius at full lock is TOP_SPEED / TURN_RATE, and is
 # independent of current speed by construction — see car.py. At these values
-# that is ~60px, so the sweeping corners sit around 25-35% of full lock.
+# that is ~71px, against a tightest corner radius of ~186px, so the sweepers sit
+# around 20-38% of full lock.
 TURN_RATE = 2.6
 
 # --- Track ------------------------------------------------------------------
@@ -68,8 +71,17 @@ TURN_RATE = 2.6
 # folded into one screen and a wide band would overlap itself.
 TRACK_WIDTH = 62.0
 
-# What we are aiming for once the circuit is drawn.
-TARGET_LAP_SECONDS = 30.0
+# --- The run ----------------------------------------------------------------
+
+# Laps in one attempt. Two, because a single lap long enough to fill 30 seconds
+# will not fit on one screen without corners too tight to be sweepers. Two laps
+# of a 15s circuit keeps arcade speed and gives the first lap away as a
+# recognition lap — nobody's first sight of a corner is also their only one.
+LAPS_PER_RUN = 2
+
+# What one attempt should come to, start line to chequered flag. Booth
+# throughput lives or dies on this number.
+TARGET_RUN_SECONDS = 30.0
 
 # --- Lap timing -------------------------------------------------------------
 

@@ -80,8 +80,13 @@ def main() -> None:
           f" -> {len(points)} centreline points")
     print(f"Length           {length:,.0f} design px")
     print(f"Top speed        {config.TOP_SPEED:,.0f} px/s")
-    print(f"Predicted lap    {world.predicted_lap_seconds:.1f}s"
-          f"   (target {config.TARGET_LAP_SECONDS:.0f}s)")
+    print(f"Centreline lap   {world.predicted_lap_seconds:.1f}s")
+    print(f"Ideal lap        {world.ideal_lap_seconds:.1f}s"
+          f"   (hugging the inside of every corner)")
+    print(f"Reference run    {world.predicted_run_seconds:.1f}s"
+          f" over {config.LAPS_PER_RUN} laps"
+          f"   (target {config.TARGET_RUN_SECONDS:.0f}s)")
+    print( "                 first-timers come in well over this; the quick ones under")
 
     print()
     radii = corner_radii(points, spacing)
@@ -100,9 +105,9 @@ def main() -> None:
           f" a quarter of the lap under {np.percentile(finite, 25):,.0f} px")
 
     print()
-    print(f"Ways to fill a {config.TARGET_LAP_SECONDS:.0f}s run:")
+    print(f"Ways to fill a {config.TARGET_RUN_SECONDS:.0f}s run:")
     for laps in (1, 2, 3):
-        speed = laps * length / config.TARGET_LAP_SECONDS
+        speed = laps * length / config.TARGET_RUN_SECONDS
         needed = (speed / config.TURN_RATE) / tightest
         note = "" if needed <= COMFORTABLE_LOCK else "  <- corners get tight"
         print(f"  {laps} lap{'s ' if laps > 1 else '  '}"
