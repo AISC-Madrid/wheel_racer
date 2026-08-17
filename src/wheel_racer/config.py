@@ -77,6 +77,12 @@ TARGET_LAP_SECONDS = 30.0
 # Stops anyone cutting across the infield for a fake time.
 NUM_CHECKPOINTS = 4
 
+# Largest single-frame change in lap progress that counts as "driven". A car at
+# TOP_SPEED on a ~4500px circuit advances about 0.0006 per frame, so even a bad
+# framerate hitch stays far under this — while a cut across the infield makes
+# progress jump by a tenth of a lap or more, which is what this catches.
+LAP_MAX_PROGRESS_STEP = 0.05
+
 # --- Recovery ---------------------------------------------------------------
 
 # Snap back to the track after this long fully off it. Nobody should be able to
