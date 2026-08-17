@@ -90,11 +90,13 @@ def scaled_tuning(scale: float) -> CarTuning:
     Speeds and acceleration are lengths per unit time, so they scale with the
     circuit. `turn_rate` is an angular rate and must not — angles do not care
     how big the screen is, and leaving it alone is what keeps the turn radius
-    growing in step with the corners.
+    growing in step with the corners. `turn_speed_response` is a ratio of two
+    speeds, so it is already scale-free.
     """
     return CarTuning(
         top_speed=config.TOP_SPEED * scale,
         grass_speed=config.GRASS_SPEED * scale,
         accel=config.ACCEL * scale,
         turn_rate=config.TURN_RATE,
+        turn_speed_response=config.TURN_SPEED_RESPONSE,
     )

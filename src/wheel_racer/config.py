@@ -58,11 +58,18 @@ GRASS_SPEED = 72.0
 # At 240, recovering from grass to full speed takes (185-72)/240 ≈ 0.5s.
 ACCEL = 240.0
 
-# Steering authority. Turn radius at full lock is TOP_SPEED / TURN_RATE, and is
-# independent of current speed by construction — see car.py. At these values
-# that is ~71px, against a tightest corner radius of ~186px, so the sweepers sit
-# around 20-38% of full lock.
-TURN_RATE = 2.6
+# Steering authority, in radians per second at full lock and full speed. Turn
+# radius at full lock is TOP_SPEED / TURN_RATE, so ~88px against a tightest
+# corner radius of ~186px — the sweepers sit under half of full lock, leaving
+# the rest as headroom for corrections. Lower this if the car feels twitchy.
+TURN_RATE = 2.1
+
+# How much of the steering goes away as the car slows down. 1.0 keeps the turn
+# radius constant at every speed, which sounds right but leaves the car barely
+# able to turn on grass — exactly when the player most needs to point it
+# somewhere. 0.5 lets a slow car turn more sharply, so rejoining the track is a
+# matter of steering back on rather than of waiting. See car.py.
+TURN_SPEED_RESPONSE = 0.5
 
 # --- Track ------------------------------------------------------------------
 

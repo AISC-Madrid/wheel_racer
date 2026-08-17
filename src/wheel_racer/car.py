@@ -28,6 +28,24 @@ class CarTuning:
     grass_speed: float
     accel: float
     turn_rate: float
+    turn_speed_response: float = 1.0
+    """How much slowing down costs you in steering authority.
+
+    Angular velocity is scaled by ``(speed / top_speed) ** turn_speed_response``:
+
+      * ``1.0`` — turn radius is the same at every speed, like a car. Going slow
+        does not tighten your line, and on grass the car answers the wheel in
+        proportion to how slow it is, which can feel like the steering has
+        stopped working.
+      * ``0.5`` — a middle ground. Slow means a tighter line, so a car that has
+        fallen off the pace can still point itself where it needs to go.
+      * ``0.0`` — angular velocity ignores speed entirely, like a tank. Turn
+        radius collapses at low speed.
+
+    Below 1.0 the car turns more sharply on grass than on tarmac, which is what
+    makes rejoining the circuit feel possible rather than like a punishment on
+    top of a punishment.
+    """
 
 
 class Car:
@@ -84,16 +102,15 @@ class Car:
             self.speed = max(target, self.speed - step)
 
     def _apply_steering(self, steering: float, dt: float, tuning: CarTuning) -> None:
-        """Rotate the car, with turn radius independent of speed.
+        """Rotate the car, with steering authority scaled by how fast it is going.
 
-        Angular velocity is scaled by ``speed / top_speed``, which makes the
-        radius ``top_speed / (steering * turn_rate)`` — the same whether the car
-        is on tarmac or crawling through grass. Two things fall out of this for
-        free: the grass penalty feels heavier than a bare speed drop (you cover
-        the same arc but it takes longer), and a stopped car cannot pivot on the
-        spot, so nobody can spin in place at the start line.
+        See `CarTuning.turn_speed_response` for what the scaling means and why
+        it is not simply proportional. Whatever it is set to, a car at a
+        standstill does not rotate at all, so nobody can spin on the spot at the
+        start line while they wait for the lights.
         """
-        if tuning.top_speed <= 0.0:
+        if tuning.top_speed <= 0.0 or self.speed <= 0.0:
             return
-        angular_velocity = steering * tuning.turn_rate * (self.speed / tuning.top_speed)
+        authority = (self.speed / tuning.top_speed) ** tuning.turn_speed_response
+        angular_velocity = steering * tuning.turn_rate * authority
         self.heading = (self.heading + angular_velocity * dt + math.pi) % TAU - math.pi

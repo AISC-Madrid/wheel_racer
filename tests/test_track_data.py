@@ -14,8 +14,9 @@ from wheel_racer.world import build_world, scaled_tuning
 
 # The car cannot take a corner tighter than TOP_SPEED / TURN_RATE, and a corner
 # that needs most of the available lock is not the sweeper this game is meant
-# to be made of.
-COMFORTABLE_LOCK = 0.40
+# to be made of. Kept well under 1.0 so there is always lock in hand to correct
+# with — a corner you can only just make is one you cannot recover from.
+COMFORTABLE_LOCK = 0.60
 
 
 @pytest.fixture(scope="module")

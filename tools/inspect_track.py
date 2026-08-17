@@ -34,8 +34,10 @@ CURVATURE_ARM_PX = 40.0
 # than this along the lap — otherwise every point is near its own neighbours.
 NEIGHBOUR_EXCLUSION_PX = 250.0
 
-# A corner needing more lock than this is no longer a sweeper.
-COMFORTABLE_LOCK = 0.40
+# A corner needing more lock than this is no longer a sweeper. Well under 1.0,
+# so that whatever lock a corner asks for, there is plenty left over to correct
+# with when the line goes wrong.
+COMFORTABLE_LOCK = 0.60
 
 
 def corner_radii(points: np.ndarray, spacing: float) -> np.ndarray:
@@ -103,6 +105,19 @@ def main() -> None:
     finite = radii[np.isfinite(radii)]
     print(f"Corner spread    median radius {np.median(finite):,.0f} px,"
           f" a quarter of the lap under {np.percentile(finite, 25):,.0f} px")
+
+    print()
+    # How tightly the car can turn once it is down on the grass. If this is not
+    # comfortably smaller than the track is wide, a player who runs wide cannot
+    # point themselves back at the tarmac and the excursion becomes a sentence.
+    grass_authority = (config.GRASS_SPEED / config.TOP_SPEED) ** config.TURN_SPEED_RESPONSE
+    grass_radius = config.GRASS_SPEED / (config.TURN_RATE * grass_authority)
+    print(f"Grass steering   {grass_authority * 100:.0f}% of full authority"
+          f"   (turn radius {grass_radius:,.0f} px)")
+    print(f"Track width      {config.TRACK_WIDTH:,.0f} px"
+          f"   {'ok — a car on the grass can turn back on'
+              if grass_radius < 2.5 * config.TRACK_WIDTH
+              else 'HARD TO REJOIN — grass turn circle is wide'}")
 
     print()
     print(f"Ways to fill a {config.TARGET_RUN_SECONDS:.0f}s run:")
