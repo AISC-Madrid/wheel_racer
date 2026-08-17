@@ -1,52 +1,48 @@
-"""All the pygame drawing.
+"""Drawing the things that change: the car, the effects, the HUD.
 
-The circuit is drawn once into a surface at startup and blitted every frame
-after that. Nothing about it moves, and rebuilding a few hundred polygon edges
-sixty times a second to get an identical picture would be the most expensive
-thing in the loop by a wide margin.
-
-The tarmac itself is two polygons, not a thick line: offsetting the centreline
-by half the track width to either side gives an outer and an inner ring, and
-filling the outer one with tarmac then the inner one with grass leaves a clean
-band with no overlapping joints. This works because the circuit never doubles
-back tighter than its own width — a property `tools/inspect_track.py` checks.
+The circuit itself is not here — it never moves, so it is drawn once into a
+surface by `trackart` and blitted. What is left is per-frame work, and there is
+one rule about it: no full-screen surface is allocated inside the loop. The
+trail, the dust and the car's shadow all need alpha, so they share a single
+scratch layer that is cleared and reused, and the off-track warning frame is
+built once and kept.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 
 import numpy as np
 import pygame
 
 from .car import Car
+from .effects import DustCloud, TyreTrail
 from .inputs import PreviewFrame
+from .trackart import CHECKPOINT, build_track_layer
 from .world import World
 
-# Muted, high-contrast against a busy outdoor scene rather than a bright
-# cartoon palette that would compete with it.
-GRASS = (38, 92, 58)
-GRASS_SPECKLE = (46, 106, 68)
-TARMAC = (58, 60, 66)
-KERB = (206, 208, 214)
-START_LINE = (240, 240, 245)
-CHECKPOINT = (120, 190, 235)
-CAR_BODY = (228, 84, 62)
-CAR_CANOPY = (44, 46, 52)
-CAR_SHADOW = (0, 0, 0, 70)
 TEXT = (240, 242, 246)
 TEXT_DIM = (168, 176, 188)
 PANEL = (18, 20, 26, 190)
 WARNING = (232, 116, 74)
 GOOD = (126, 214, 148)
 
-SPECKLE_COUNT = 900
-SPECKLE_SEED = 7
+CAR_BODY = (228, 84, 62)
+CAR_BODY_DARK = (176, 58, 42)
+CAR_CANOPY = (38, 42, 52)
+CAR_GLASS = (128, 176, 210)
+CAR_WHEEL = (26, 27, 31)
+CAR_SHADOW = (0, 0, 0, 80)
 
 # Car body, in design pixels, pointing along +x.
-CAR_LENGTH = 30.0
-CAR_WIDTH = 16.0
+CAR_LENGTH = 34.0
+CAR_WIDTH = 18.0
+WHEEL_LENGTH = 10.0
+WHEEL_WIDTH = 5.0
+# How far the front wheels visibly turn at full lock. Exaggerated well past
+# anything the car actually does, because a wheel that moves two degrees may as
+# well not move: this is the player's confirmation that their hands registered.
+MAX_WHEEL_DEG = 30.0
 
 
 def format_time(seconds: float | None) -> str:
@@ -58,22 +54,24 @@ def format_time(seconds: float | None) -> str:
     return f"{seconds:.2f}"
 
 
-@dataclass(frozen=True)
-class _Ring:
-    """The two edges of the tarmac, outer first."""
-
-    outer: np.ndarray
-    inner: np.ndarray
-
-
 class Renderer:
-    """Draws the game. Owns the prebuilt track layer and the fonts."""
+    """Draws the game. Owns the prebuilt track layer, the fonts and the scratch."""
 
     def __init__(self, screen: pygame.Surface, world: World) -> None:
         self.screen = screen
         self.world = world
         self.scale = world.scale
         self.track_layer = build_track_layer(world, screen.get_size())
+
+        # One transparent layer, cleared and reused every frame for everything
+        # that needs alpha. Allocating these per frame was several megabytes a
+        # second of churn for no reason.
+        #
+        # The explicit 32 matters: SRCALPHA on its own can inherit a display
+        # format with no alpha channel, and then clearing to (0, 0, 0, 0) gives
+        # opaque black rather than nothing, which blits the whole picture out.
+        self._scratch = pygame.Surface(screen.get_size(), pygame.SRCALPHA, 32)
+        self._edge_glow: pygame.Surface | None = None
         self._anchor_size: tuple[int, int] | None = None
         self._anchor: tuple[int, int] = (0, 0)
 
@@ -89,38 +87,84 @@ class Renderer:
 
     # --- world ---------------------------------------------------------------
 
-    def draw_world(self, car: Car) -> None:
+    def draw_world(self, car: Car, steering: float = 0.0,
+                   trail: TyreTrail | None = None,
+                   dust: DustCloud | None = None) -> None:
         self.screen.blit(self.track_layer, (0, 0))
-        self._draw_car(car)
 
-    def _draw_car(self, car: Car) -> None:
-        length = CAR_LENGTH * self.scale
-        width = CAR_WIDTH * self.scale
-        nose = length / 2.0
+        self._scratch.fill((0, 0, 0, 0))
+        if trail is not None:
+            trail.draw(self._scratch, self.scale)
+        if dust is not None:
+            dust.draw(self._scratch, self.scale)
+        self._draw_shadow(car)
+        self.screen.blit(self._scratch, (0, 0))
 
-        body = [
-            (-nose, -width / 2),
-            (nose * 0.55, -width / 2),
-            (nose, 0.0),
-            (nose * 0.55, width / 2),
-            (-nose, width / 2),
+        self._draw_car(car, steering)
+
+    def _car_body(self) -> list[tuple[float, float]]:
+        nose = CAR_LENGTH * self.scale / 2.0
+        half = CAR_WIDTH * self.scale / 2.0
+        return [
+            (-nose, -half * 0.86),
+            (-nose * 0.7, -half),
+            (nose * 0.55, -half),
+            (nose, -half * 0.5),
+            (nose, half * 0.5),
+            (nose * 0.55, half),
+            (-nose * 0.7, half),
+            (-nose, half * 0.86),
         ]
+
+    def _draw_shadow(self, car: Car) -> None:
+        offset = 3.0 * self.scale
+        pygame.draw.polygon(self._scratch, CAR_SHADOW,
+                            _place(self._car_body(), car.x + offset, car.y + offset,
+                                   car.heading))
+
+    def _draw_car(self, car: Car, steering: float) -> None:
+        nose = CAR_LENGTH * self.scale / 2.0
+        half = CAR_WIDTH * self.scale / 2.0
+        wheel_angle = math.radians(MAX_WHEEL_DEG) * max(-1.0, min(1.0, steering))
+
+        # Wheels first, so the body sits over their inner ends and only the part
+        # that should stick out does.
+        for along, turn in ((nose * 0.58, wheel_angle), (-nose * 0.6, 0.0)):
+            for side in (-1.0, 1.0):
+                self._draw_wheel(car, along, side * (half + 1.0 * self.scale), turn)
+
+        pygame.draw.polygon(self.screen, CAR_BODY,
+                            _place(self._car_body(), car.x, car.y, car.heading))
+        pygame.draw.polygon(self.screen, CAR_BODY_DARK,
+                            _place(self._car_body(), car.x, car.y, car.heading),
+                            width=max(1, round(2 * self.scale)))
+
         canopy = [
-            (-nose * 0.15, -width * 0.28),
-            (nose * 0.45, -width * 0.22),
-            (nose * 0.45, width * 0.22),
-            (-nose * 0.15, width * 0.28),
+            (-nose * 0.25, -half * 0.62),
+            (nose * 0.3, -half * 0.5),
+            (nose * 0.3, half * 0.5),
+            (-nose * 0.25, half * 0.62),
         ]
+        pygame.draw.polygon(self.screen, CAR_CANOPY,
+                            _place(canopy, car.x, car.y, car.heading))
+        windscreen = [
+            (nose * 0.16, -half * 0.44),
+            (nose * 0.32, -half * 0.36),
+            (nose * 0.32, half * 0.36),
+            (nose * 0.16, half * 0.44),
+        ]
+        pygame.draw.polygon(self.screen, CAR_GLASS,
+                            _place(windscreen, car.x, car.y, car.heading))
 
-        placed = _place(body, car.x, car.y, car.heading)
-        shadow = _place(body, car.x + 2 * self.scale, car.y + 3 * self.scale, car.heading)
-
-        blur = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
-        pygame.draw.polygon(blur, CAR_SHADOW, shadow)
-        self.screen.blit(blur, (0, 0))
-
-        pygame.draw.polygon(self.screen, CAR_BODY, placed)
-        pygame.draw.polygon(self.screen, CAR_CANOPY, _place(canopy, car.x, car.y, car.heading))
+    def _draw_wheel(self, car: Car, along: float, across: float, turn: float) -> None:
+        length = WHEEL_LENGTH * self.scale / 2.0
+        width = WHEEL_WIDTH * self.scale / 2.0
+        shape = [(-length, -width), (length, -width), (length, width), (-length, width)]
+        # Turn the wheel about its own hub, put the hub on the car, then take the
+        # whole thing round to the car's heading.
+        hub = _offset(_rotate(shape, turn), along, across)
+        pygame.draw.polygon(self.screen, CAR_WHEEL,
+                            _place(hub, car.x, car.y, car.heading))
 
     # --- hud -----------------------------------------------------------------
 
@@ -184,21 +228,21 @@ class Renderer:
 
         The speed drop is the actual penalty, but it is surprisingly easy to
         miss on a small screen — a first-timer often does not notice they have
-        left the tarmac at all, only that they are suddenly slower.
+        left the tarmac at all, only that they are suddenly slower. Built once
+        and kept, since it is the same every time.
         """
-        thickness = round(10 * self.scale)
-        glow = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
-        pygame.draw.rect(
-            glow,
-            (*WARNING, 90),
-            glow.get_rect(),
-            width=thickness,
-            border_radius=thickness,
-        )
-        self.screen.blit(glow, (0, 0))
+        if self._edge_glow is None:
+            thickness = round(10 * self.scale)
+            glow = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA, 32)
+            pygame.draw.rect(glow, (*WARNING, 90), glow.get_rect(),
+                             width=thickness, border_radius=thickness)
+            self._edge_glow = glow
+        self.screen.blit(self._edge_glow, (0, 0))
+
+    # --- camera preview ------------------------------------------------------
 
     def draw_preview(self, preview: PreviewFrame | None) -> None:
-        """The camera image, small, in the bottom corner.
+        """The camera image, small, clear of the circuit.
 
         Worth the screen space it costs. A player who cannot see themselves has
         no way to tell a car that will not turn from a camera that cannot see
@@ -222,15 +266,18 @@ class Renderer:
         self._panel(frame)
         self.screen.blit(image, (left, top))
 
-        if preview.has_hands:
-            a = (left + preview.left[0], top + preview.left[1])
-            b = (left + preview.right[0], top + preview.right[1])
-            pygame.draw.line(self.screen, CHECKPOINT, a, b, max(2, round(3 * self.scale)))
-            for point in (a, b):
-                pygame.draw.circle(self.screen, TEXT, point, max(4, round(5 * self.scale)))
-        else:
+        wrists = preview.wrists
+        if wrists is None:
             label = self.font_label.render("NO HANDS", True, WARNING)
             self.screen.blit(label, (left + border, top + border))
+            return
+
+        (left_x, left_y), (right_x, right_y) = wrists
+        a = (left + left_x, top + left_y)
+        b = (left + right_x, top + right_y)
+        pygame.draw.line(self.screen, CHECKPOINT, a, b, max(2, round(3 * self.scale)))
+        for point in (a, b):
+            pygame.draw.circle(self.screen, TEXT, point, max(4, round(5 * self.scale)))
 
     def _preview_anchor(self, size: tuple[int, int]) -> tuple[int, int]:
         """Find somewhere to put the preview that is not on top of the circuit.
@@ -313,132 +360,46 @@ class Renderer:
         total = sum(splits)
         pad = round(30 * self.scale)
 
-        rows = [(self.font_huge.render(format_time(total), True, GOOD if is_best else TEXT), 0)]
-        rows.append((self.font_label.render(
-            "NEW BEST" if is_best else "YOUR TIME", True, GOOD if is_best else TEXT_DIM), 0))
+        rows = [self.font_huge.render(format_time(total), True, GOOD if is_best else TEXT)]
+        rows.append(self.font_label.render(
+            "NEW BEST" if is_best else "YOUR TIME", True, GOOD if is_best else TEXT_DIM))
         for index, split in enumerate(splits, start=1):
-            rows.append((self.font_body.render(
-                f"lap {index}   {format_time(split)}", True, TEXT_DIM), 0))
+            rows.append(self.font_body.render(
+                f"lap {index}   {format_time(split)}", True, TEXT_DIM))
         if best is not None and not is_best:
-            rows.append((self.font_body.render(
-                f"best    {format_time(best)}", True, TEXT_DIM), 0))
+            rows.append(self.font_body.render(
+                f"best    {format_time(best)}", True, TEXT_DIM))
 
         gap = round(10 * self.scale)
-        width = max(row.get_width() for row, _ in rows) + 2 * pad
-        height = sum(row.get_height() for row, _ in rows) + gap * (len(rows) - 1) + 2 * pad
+        width = max(row.get_width() for row in rows) + 2 * pad
+        height = sum(row.get_height() for row in rows) + gap * (len(rows) - 1) + 2 * pad
         rect = pygame.Rect(0, 0, width, height)
         rect.center = self.screen.get_rect().center
         self._panel(rect)
 
         y = rect.top + pad
-        for row, _ in rows:
+        for row in rows:
             self.screen.blit(row, (rect.centerx - row.get_width() // 2, y))
             y += row.get_height() + gap
 
     def _panel(self, rect: pygame.Rect) -> None:
         """A translucent slab, so text stays readable over grass or tarmac."""
-        panel = pygame.Surface(rect.size, pygame.SRCALPHA)
+        panel = pygame.Surface(rect.size, pygame.SRCALPHA, 32)
         pygame.draw.rect(panel, PANEL, panel.get_rect(), border_radius=round(10 * self.scale))
         self.screen.blit(panel, rect.topleft)
 
 
-def build_track_layer(world: World, size: tuple[int, int]) -> pygame.Surface:
-    """Draw the circuit once, into a surface we blit every frame."""
-    layer = pygame.Surface(size)
-    layer.fill(GRASS)
-
-    ring = _tarmac_ring(world)
-    pygame.draw.polygon(layer, TARMAC, ring.outer)
-    pygame.draw.polygon(layer, GRASS, ring.inner)
-
-    _speckle_the_grass(layer, world, size)
-
-    edge = max(2, round(3 * world.scale))
-    pygame.draw.polygon(layer, KERB, ring.outer, width=edge)
-    pygame.draw.polygon(layer, KERB, ring.inner, width=edge)
-
-    _draw_gates(layer, world)
-    return layer
+# --- placing shapes ---------------------------------------------------------
 
 
-def _tarmac_ring(world: World) -> _Ring:
-    """Offset the centreline either way by half the track width."""
-    points = world.track.points
-    half_width = world.track.width / 2.0
-
-    tangents = np.roll(points, -1, axis=0) - np.roll(points, 1, axis=0)
-    lengths = np.hypot(tangents[:, 0], tangents[:, 1])[:, None]
-    normals = np.column_stack([-tangents[:, 1], tangents[:, 0]]) / lengths
-
-    a = points + normals * half_width
-    b = points - normals * half_width
-    # Whichever encloses more area is the outside; which one that is depends on
-    # the direction the circuit was authored in.
-    return _Ring(a, b) if abs(_signed_area(a)) > abs(_signed_area(b)) else _Ring(b, a)
+def _rotate(shape: list[tuple[float, float]], angle: float) -> list[tuple[float, float]]:
+    cos, sin = math.cos(angle), math.sin(angle)
+    return [(px * cos - py * sin, px * sin + py * cos) for px, py in shape]
 
 
-def _signed_area(polygon: np.ndarray) -> float:
-    x, y = polygon[:, 0], polygon[:, 1]
-    return 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
-
-
-def _speckle_the_grass(layer: pygame.Surface, world: World, size: tuple[int, int]) -> None:
-    """Scatter flecks on the grass so it is not a flat slab of colour.
-
-    Placed with the track's own `locate`, so they keep clear of the tarmac
-    without needing a mask.
-    """
-    rng = np.random.default_rng(SPECKLE_SEED)
-    xs = rng.uniform(0, size[0], SPECKLE_COUNT)
-    ys = rng.uniform(0, size[1], SPECKLE_COUNT)
-    clearance = world.track.width / 2.0 + 6.0 * world.scale
-
-    for x, y in zip(xs, ys):
-        if world.track.locate(float(x), float(y)).distance > clearance:
-            pygame.draw.circle(layer, GRASS_SPECKLE, (int(x), int(y)),
-                               max(1, round(2 * world.scale)))
-
-
-def _draw_gates(layer: pygame.Surface, world: World) -> None:
-    """The start line, and a tick at each checkpoint gate.
-
-    Gate positions come from `laptimer.gate_progresses`, the same function the
-    validator checks against, so what is drawn and what is judged cannot drift
-    apart — a lap rejected for missing a gate that was never on the track would
-    be impossible for a player to make sense of.
-
-    Gates are drawn faintly and only at the edges. They are lap-validation
-    machinery, not obstacles, and anything bold across the track reads as
-    something to avoid.
-    """
-    from . import config
-    from .laptimer import gate_progresses
-
-    half_width = world.track.width / 2.0
-
-    x, y, heading = world.track.pose_at(0.0)
-    across = _across(heading)
-    pygame.draw.line(
-        layer, START_LINE,
-        (x - across[0] * half_width, y - across[1] * half_width),
-        (x + across[0] * half_width, y + across[1] * half_width),
-        max(3, round(5 * world.scale)),
-    )
-
-    for progress in gate_progresses(config.NUM_CHECKPOINT_GATES):
-        x, y, heading = world.track.pose_at(progress)
-        across = _across(heading)
-        for side in (-1, 1):
-            outer = (x + across[0] * half_width * side, y + across[1] * half_width * side)
-            inner = (x + across[0] * half_width * side * 0.72,
-                     y + across[1] * half_width * side * 0.72)
-            pygame.draw.line(layer, CHECKPOINT, inner, outer,
-                             max(2, round(4 * world.scale)))
-
-
-def _across(heading: float) -> tuple[float, float]:
-    """Unit vector at right angles to the track, for drawing lines across it."""
-    return math.cos(heading + math.pi / 2), math.sin(heading + math.pi / 2)
+def _offset(shape: list[tuple[float, float]], dx: float,
+            dy: float) -> list[tuple[float, float]]:
+    return [(px + dx, py + dy) for px, py in shape]
 
 
 def _place(shape: list[tuple[float, float]], x: float, y: float,

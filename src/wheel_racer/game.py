@@ -17,6 +17,7 @@ import pygame
 
 from . import config
 from .car import Car
+from .effects import DustCloud, TyreTrail
 from .inputs import InputSource, PreviewFrame
 from .laptimer import LapTimer
 from .recovery import RecoveryMonitor
@@ -77,6 +78,8 @@ class Game:
             off_track_seconds=config.RESPAWN_AFTER_OFF_TRACK_S,
             backwards_seconds=config.RESPAWN_AFTER_BACKWARDS_S,
         )
+        self.trail = TyreTrail()
+        self.dust = DustCloud()
 
         self.state = State.ATTRACT
         self.now = 0.0
@@ -175,6 +178,10 @@ class Game:
         self.located = self.world.track.locate(self.car.x, self.car.y)
         self.car.update(steering, self.located.on_track, dt, self.world.tuning)
 
+        self.trail.update(self.car.x, self.car.y, dt)
+        self.dust.update(self.car.x, self.car.y, self.car.heading, self.car.speed,
+                         self.located.on_track, dt, self.world.scale)
+
         if self.recovery.update(self.located.on_track, self.car.heading,
                                 self.located.heading, dt):
             self._respawn()
@@ -209,6 +216,10 @@ class Game:
         """
         x, y, heading = self.located.pose
         self.car.reset(x, y, heading, speed=self.world.tuning.grass_speed)
+        # Without this the trail draws a straight line from wherever the car was
+        # stranded to where it reappears, which looks like it drove through the
+        # infield — the exact thing the lap validator exists to forbid.
+        self.trail.clear()
         self._respawn_flash_until = self.now + RESPAWN_FLASH_SECONDS
 
     def _abandon(self) -> None:
@@ -234,6 +245,10 @@ class Game:
     def _reset_car(self) -> None:
         self.car.reset(*self.world.track.start_pose())
         self.located = self.world.track.locate(self.car.x, self.car.y)
+        # One player's line must not still be on the track behind the next
+        # player's car.
+        self.trail.clear()
+        self.dust.clear()
 
     # --- drawing -------------------------------------------------------------
 
@@ -246,7 +261,7 @@ class Game:
         return sum(self.splits) + (running or 0.0)
 
     def _draw(self, steering: float) -> None:
-        self.renderer.draw_world(self.car)
+        self.renderer.draw_world(self.car, steering, self.trail, self.dust)
         self.renderer.draw_preview(self.preview)
 
         if not self.source.is_healthy:

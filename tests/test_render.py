@@ -12,8 +12,10 @@ import pytest
 
 from wheel_racer import config
 from wheel_racer.car import Car
+from wheel_racer.effects import DustCloud, TyreTrail
 from wheel_racer.inputs import PreviewFrame
-from wheel_racer.render import GRASS, TARMAC, Renderer, build_track_layer, format_time
+from wheel_racer.render import Renderer, format_time
+from wheel_racer.trackart import GRASS, TARMAC, build_track_layer
 from wheel_racer.world import build_world
 
 
@@ -58,6 +60,30 @@ class TestRendererStates:
 
     def test_draws_the_car(self, renderer, world):
         renderer.draw_world(Car(*world.track.start_pose()))
+
+    def test_draws_the_car_at_every_steering_angle(self, renderer, world):
+        """The front wheels are rotated by the steering, so every lock has to
+        produce a drawable polygon."""
+        for steering in (-1.0, -0.4, 0.0, 0.4, 1.0):
+            renderer.draw_world(Car(*world.track.start_pose()), steering)
+
+    def test_draws_the_car_with_effects(self, renderer, world):
+        trail, dust = TyreTrail(), DustCloud(seed=1)
+        car = Car(*world.track.start_pose())
+        for _ in range(30):
+            car.x += 4.0
+            trail.update(car.x, car.y, 1 / 60)
+            dust.update(car.x, car.y, car.heading, 180.0, on_track=False, dt=1 / 60)
+        renderer.draw_world(car, 0.3, trail, dust)
+
+    def test_the_scratch_layer_is_reused_not_reallocated(self, renderer, world):
+        """Effects need alpha, and a fresh full-screen surface every frame was
+        several megabytes a second of churn for an identical result."""
+        car = Car(*world.track.start_pose())
+        renderer.draw_world(car)
+        first = renderer._scratch
+        renderer.draw_world(car)
+        assert renderer._scratch is first
 
     def test_draws_the_hud_on_track(self, renderer):
         renderer.draw_hud(12.5, 1, 2, None, 0.4, on_track=True)
