@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Booth data — holds participant names and email addresses. Never commit it.
+data/
