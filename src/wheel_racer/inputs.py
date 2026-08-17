@@ -48,8 +48,20 @@ class PreviewFrame:
     right: Point | None
 
     @property
+    def wrists(self) -> tuple[Point, Point] | None:
+        """Both wrists together, or None unless both were seen.
+
+        Returning the pair rather than answering a yes/no question is what lets
+        a caller use them without having to re-check each one — a half-sighting
+        is useless anyway, so there is never a reason to reach for one alone.
+        """
+        if self.left is None or self.right is None:
+            return None
+        return self.left, self.right
+
+    @property
     def has_hands(self) -> bool:
-        return self.left is not None and self.right is not None
+        return self.wrists is not None
 
 
 class InputSource(Protocol):

@@ -17,7 +17,7 @@ import pytest
 
 from wheel_racer import config
 from wheel_racer.game import COUNTDOWN_SECONDS, RESULT_SECONDS, Game, State
-from wheel_racer.inputs import WristSample
+from wheel_racer.inputs import KeyboardInput, WristSample
 from wheel_racer.world import build_world
 
 DT = 1.0 / 60.0
@@ -84,7 +84,7 @@ def display():
 @pytest.fixture
 def game(display) -> Game:
     pygame.event.clear()
-    instance = Game(source=None, screen=display, world=build_world())
+    instance = Game(source=KeyboardInput(), screen=display, world=build_world())
     instance.source = WristAutopilot(instance)
     return instance
 
@@ -135,7 +135,8 @@ class TestStartingByHoldingTheWheel:
     @pytest.fixture
     def booth(self, display) -> Game:
         pygame.event.clear()
-        instance = Game(source=None, screen=display, world=build_world(), auto_start=True)
+        instance = Game(source=KeyboardInput(), screen=display, world=build_world(),
+                        auto_start=True)
         instance.source = WristAutopilot(instance)
         return instance
 

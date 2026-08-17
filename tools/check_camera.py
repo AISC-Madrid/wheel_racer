@@ -91,7 +91,7 @@ def measure(cv2, index: int):
     elapsed = time.monotonic() - started
     capture.release()
 
-    if not frames:
+    if not frames or shape is None:
         fail("no frames at all")
         return None
 
@@ -123,8 +123,8 @@ def check_hands(cv2, mp, index: int) -> None:
         found = len(getattr(result, "multi_hand_landmarks", None) or [])
         seen[min(found, 2)] += 1
 
-        if found == 2:
-            sample = wrists_from_result(result, frame.shape[1], frame.shape[0])
+        sample = wrists_from_result(result, frame.shape[1], frame.shape[0])
+        if sample is not None:
             print(f"\r  both wrists: left {sample.left[0]:6.0f},{sample.left[1]:6.0f}"
                   f"   right {sample.right[0]:6.0f},{sample.right[1]:6.0f}", end="")
 

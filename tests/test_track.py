@@ -46,7 +46,8 @@ class TestConstruction:
 
     def test_rejects_points_that_are_not_pairs(self):
         with pytest.raises(ValueError):
-            Track([(0.0, 0.0, 0.0), (1.0, 1.0, 1.0), (2.0, 2.0, 2.0)], width=WIDTH)
+            Track([(0.0, 0.0, 0.0), (1.0, 1.0, 1.0), (2.0, 2.0, 2.0)],  # type: ignore[list-item]
+                  width=WIDTH)
 
 
 class TestOnTrack:

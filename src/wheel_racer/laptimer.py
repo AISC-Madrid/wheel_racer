@@ -124,6 +124,12 @@ class LapTimer:
 
     def _finish(self, now: float) -> float | None:
         """Handle a forward crossing of the start line."""
+        if self._lap_start is None:
+            # `update` only reaches here with a lap running, but a crossing with
+            # no clock started is meaningless rather than exceptional — say so
+            # here instead of relying on the caller having checked.
+            return None
+
         if self._next_gate < len(self._thresholds):
             # Gates were missed, so this is not a lap. Start a fresh one from
             # here rather than stranding the player with a dead clock.
