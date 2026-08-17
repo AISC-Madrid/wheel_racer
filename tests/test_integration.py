@@ -59,7 +59,7 @@ class Attempt:
 def drive_a_run(laps_wanted: int = config.LAPS_PER_RUN, limit_seconds: float = 120.0) -> Attempt:
     world = build_world()
     car = Car(*world.track.start_pose())
-    timer = LapTimer(config.NUM_CHECKPOINTS, config.LAP_MAX_PROGRESS_STEP)
+    timer = LapTimer(config.NUM_CHECKPOINT_GATES, config.LAP_MAX_PROGRESS_STEP)
 
     now = 0.0
     timer.start(now)

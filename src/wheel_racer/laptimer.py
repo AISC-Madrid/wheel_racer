@@ -16,6 +16,22 @@ without needing any shortcut-detection geometry.
 from __future__ import annotations
 
 
+def gate_progresses(gates: int) -> list[float]:
+    """Where the gates sit round the lap, as progress values in (0, 1).
+
+    The single source of truth for gate positions. The renderer draws them from
+    this and the validator checks them against this, so what a player can see on
+    the track is always exactly what their lap is judged on — which stops the
+    two drifting apart into a game that rejects laps for missing a gate that was
+    never drawn.
+
+    The start line is not a gate. It sits at progress 0 and crossing it is what
+    *ends* a lap, so `gates=4` means four gates plus the line: five places the
+    car has to pass, four of them marked.
+    """
+    return [index / (gates + 1) for index in range(1, gates + 1)]
+
+
 class LapTimer:
     """Times one lap at a time and decides whether it was driven honestly.
 
@@ -24,18 +40,19 @@ class LapTimer:
     a valid lap completes, and ``None`` on every other frame.
     """
 
-    def __init__(self, num_checkpoints: int = 4, max_progress_step: float = 0.05) -> None:
-        if num_checkpoints < 1:
-            raise ValueError("a lap needs at least one checkpoint")
+    def __init__(self, gates: int = 3, max_progress_step: float = 0.05) -> None:
+        if gates < 0:
+            raise ValueError("gates cannot be negative")
         if not 0.0 < max_progress_step < 0.5:
             raise ValueError("max_progress_step must be between 0 and 0.5")
 
-        self.num_checkpoints = num_checkpoints
+        self.gates = gates
         self.max_progress_step = max_progress_step
         self.best: float | None = None
         self.last: float | None = None
+        self._thresholds = gate_progresses(gates)
         self._lap_start: float | None = None
-        self._next_checkpoint = 1
+        self._next_gate = 0
         self._last_progress: float | None = None
 
     @property
@@ -44,30 +61,16 @@ class LapTimer:
         return self._lap_start is not None
 
     @property
-    def checkpoints_required(self) -> int:
-        """How many gates a lap must clear.
-
-        One fewer than ``num_checkpoints``, because the checkpoint at progress
-        zero is the start line itself and crossing it is what ends the lap.
-        """
-        return self.num_checkpoints - 1
-
-    @property
-    def checkpoints_reached(self) -> int:
-        """Gates cleared so far this lap, for the HUD's "2/3"."""
-        return self._next_checkpoint - 1
-
-    @property
-    def checkpoint_progresses(self) -> list[float]:
-        """Where the gates sit around the lap, for the renderer to draw them."""
-        return [i / self.num_checkpoints for i in range(self.num_checkpoints)]
+    def gates_cleared(self) -> int:
+        """Gates passed so far this lap, for the HUD's "2/4"."""
+        return self._next_gate
 
     def reset(self) -> None:
         """Forget everything, including the best time. Call for a new player."""
         self.best = None
         self.last = None
         self._lap_start = None
-        self._next_checkpoint = 1
+        self._next_gate = 0
         self._last_progress = None
 
     def start(self, now: float) -> None:
@@ -77,7 +80,7 @@ class LapTimer:
         first lap has to be started explicitly — there is no crossing to detect.
         """
         self._lap_start = now
-        self._next_checkpoint = 1
+        self._next_gate = 0
         self._last_progress = None
 
     def current_time(self, now: float) -> float | None:
@@ -102,27 +105,26 @@ class LapTimer:
 
         # Unwrapped position, which may run past 1.0 on the finishing frame.
         position = previous + step
-        self._credit_checkpoint(previous, position)
+        self._credit_gate(previous, position)
 
         if position >= 1.0:
             return self._finish(now)
         return None
 
-    def _credit_checkpoint(self, previous: float, position: float) -> None:
+    def _credit_gate(self, previous: float, position: float) -> None:
         """Tick off the next gate if this frame drove through it.
 
         Only ever the *next* one, and only ever forwards, so no single frame
         can account for more of the lap than it actually covered.
         """
-        if self._next_checkpoint >= self.num_checkpoints:
+        if self._next_gate >= len(self._thresholds):
             return
-        threshold = self._next_checkpoint / self.num_checkpoints
-        if previous < threshold <= position:
-            self._next_checkpoint += 1
+        if previous < self._thresholds[self._next_gate] <= position:
+            self._next_gate += 1
 
     def _finish(self, now: float) -> float | None:
         """Handle a forward crossing of the start line."""
-        if self._next_checkpoint < self.num_checkpoints:
+        if self._next_gate < len(self._thresholds):
             # Gates were missed, so this is not a lap. Start a fresh one from
             # here rather than stranding the player with a dead clock.
             self.start(now)

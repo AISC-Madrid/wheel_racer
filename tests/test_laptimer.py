@@ -7,7 +7,7 @@ start line — because those are what a leaderboard has to survive.
 
 import pytest
 
-from wheel_racer.laptimer import LapTimer
+from wheel_racer.laptimer import LapTimer, gate_progresses
 
 DT = 1.0 / 60.0
 STEP = 0.002  # progress per frame; 500 frames to the lap, near the real rate
@@ -56,7 +56,7 @@ class Sim:
 
 @pytest.fixture
 def timer() -> LapTimer:
-    return LapTimer(num_checkpoints=4, max_progress_step=0.05)
+    return LapTimer(gates=3, max_progress_step=0.05)
 
 
 @pytest.fixture
@@ -75,7 +75,7 @@ class TestCleanLap:
 
     def test_every_gate_is_cleared_on_a_clean_lap(self, sim, timer):
         sim.drive(0.99)
-        assert timer.checkpoints_reached == timer.checkpoints_required
+        assert timer.gates_cleared == timer.gates
 
     def test_the_clock_stops_at_the_line(self, sim, timer):
         sim.drive(1.0)
@@ -108,7 +108,7 @@ class TestInfieldShortcut:
     def test_a_shortcut_credits_no_gate(self, sim, timer):
         sim.drive(0.1)
         sim.jump_to(0.6)
-        assert timer.checkpoints_reached == 0
+        assert timer.gates_cleared == 0
 
     def test_the_jump_frame_itself_scores_nothing(self, sim):
         sim.drive(0.1)
@@ -152,21 +152,21 @@ class TestStartLineAbuse:
 
     def test_driving_backwards_credits_no_gate(self, sim, timer):
         sim.drive(-0.9)
-        assert timer.checkpoints_reached == 0
+        assert timer.gates_cleared == 0
 
 
 class TestGateOrder:
     def test_gates_are_credited_one_at_a_time(self, sim, timer):
         sim.drive(0.26)
-        assert timer.checkpoints_reached == 1
+        assert timer.gates_cleared == 1
         sim.drive(0.25)
-        assert timer.checkpoints_reached == 2
+        assert timer.gates_cleared == 2
 
     def test_a_gate_stays_credited_after_backtracking(self, sim, timer):
         """Running wide and rejoining behind a gate must not un-clear it."""
         sim.drive(0.3)
         sim.drive(-0.1)
-        assert timer.checkpoints_reached == 1
+        assert timer.gates_cleared == 1
 
     def test_an_excursion_and_recovery_still_scores(self, sim):
         sim.drive(0.3)
@@ -174,10 +174,42 @@ class TestGateOrder:
         assert len(sim.drive(0.8)) == 1
 
     def test_a_single_checkpoint_lap_needs_no_gates(self):
-        timer = LapTimer(num_checkpoints=1)
+        timer = LapTimer(gates=0)
         run = Sim(timer)
         run.green_light()
         assert run.drive(1.0) == [pytest.approx(LAP_SECONDS)]
+
+
+class TestGatePositions:
+    """`gate_progresses` is the one place gate positions are decided, so that
+    the ticks drawn on the track and the gates a lap is judged against cannot
+    disagree. A lap rejected for missing a gate that was never drawn would be
+    impossible for a player to make sense of."""
+
+    def test_the_count_is_what_was_asked_for(self):
+        """The number of gates is the number of ticks on screen. The start line
+        is not one of them — crossing it is what ends a lap."""
+        assert len(gate_progresses(5)) == 5
+
+    def test_gates_are_evenly_spaced_around_the_lap(self):
+        assert gate_progresses(3) == [pytest.approx(0.25), pytest.approx(0.5),
+                                      pytest.approx(0.75)]
+
+    def test_no_gate_sits_on_the_start_line(self):
+        """One at progress 0 would be cleared for free the instant a lap began,
+        and one at 1.0 is the line again."""
+        for gates in range(0, 9):
+            assert all(0.0 < progress < 1.0 for progress in gate_progresses(gates))
+
+    def test_gates_are_in_order(self):
+        assert gate_progresses(7) == sorted(gate_progresses(7))
+
+    def test_no_gates_is_a_valid_circuit(self):
+        assert gate_progresses(0) == []
+
+    def test_the_timer_uses_exactly_these_positions(self, timer):
+        """The guard against the renderer and the validator drifting apart."""
+        assert timer._thresholds == gate_progresses(timer.gates)
 
 
 class TestClock:
@@ -214,9 +246,9 @@ class TestReset:
 
 
 class TestValidation:
-    def test_rejects_zero_checkpoints(self):
+    def test_rejects_a_negative_number_of_gates(self):
         with pytest.raises(ValueError):
-            LapTimer(num_checkpoints=0)
+            LapTimer(gates=-1)
 
     @pytest.mark.parametrize("step", [0.0, -0.1, 0.5, 1.0])
     def test_rejects_an_implausible_step_limit(self, step):
@@ -229,7 +261,7 @@ class TestValidation:
         timer.start(0.0)
         timer.update(0.10, 0.0)
         timer.update(0.15, DT)  # exactly max_progress_step
-        assert timer.checkpoints_reached == 0  # no gate between 0.10 and 0.15
+        assert timer.gates_cleared == 0  # no gate between 0.10 and 0.15
         timer.update(0.20, 2 * DT)
         timer.update(0.25, 3 * DT)
-        assert timer.checkpoints_reached == 1
+        assert timer.gates_cleared == 1
