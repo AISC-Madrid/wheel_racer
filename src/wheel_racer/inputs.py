@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    import numpy as np
 
 Point = tuple[float, float]
 
@@ -34,16 +37,47 @@ class WristSample:
     right: Point
 
 
+@dataclass(frozen=True)
+class PreviewFrame:
+    """A small camera image to show the player, with what was found in it."""
+
+    rgb: np.ndarray
+    """``(height, width, 3)`` uint8."""
+    left: Point | None
+    """Wrist positions in this image's own pixels, or None if not seen."""
+    right: Point | None
+
+    @property
+    def has_hands(self) -> bool:
+        return self.left is not None and self.right is not None
+
+
 class InputSource(Protocol):
     """Something that produces wrist samples.
 
-    `poll` returns ``None`` when there is nothing new — either because no frame
-    has arrived since last time, or because the hands were not found in it. The
-    caller cannot tell those apart and does not need to: both mean "hold the
-    last steering value".
+    `poll` returns ``None`` to mean "there are no wrists to steer by right
+    now" — the hands were not found, or the camera has stopped producing
+    frames at all. It does *not* mean "no new frame since last time": a source
+    slower than the game loop repeats its most recent sample instead, because
+    the two cases need opposite handling. A repeat is normal and harmless; a
+    genuine absence starts the clock on abandoning the lap.
     """
 
     def poll(self, dt: float) -> WristSample | None:
+        ...
+
+    def preview(self) -> PreviewFrame | None:
+        """A camera image to show the player, if this source has one."""
+        ...
+
+    @property
+    def is_healthy(self) -> bool:
+        """Whether the source is working at all.
+
+        Separate from whether it can see hands. "Move into the light" and "the
+        webcam has fallen out" need different responses from different people,
+        and a booth where those look identical wastes everybody's afternoon.
+        """
         ...
 
     def close(self) -> None:
@@ -100,6 +134,15 @@ class KeyboardInput:
         """
         self._tilt_deg = self._next_tilt(left, right, dt)
         return self._as_wrists(self._tilt_deg)
+
+    def preview(self) -> PreviewFrame | None:
+        """No camera, nothing to show."""
+        return None
+
+    @property
+    def is_healthy(self) -> bool:
+        """A keyboard does not break in the interesting way."""
+        return True
 
     def close(self) -> None:
         """Nothing to release — here to satisfy the protocol."""

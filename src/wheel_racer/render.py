@@ -21,6 +21,7 @@ import numpy as np
 import pygame
 
 from .car import Car
+from .inputs import PreviewFrame
 from .world import World
 
 # Muted, high-contrast against a busy outdoor scene rather than a bright
@@ -73,6 +74,8 @@ class Renderer:
         self.world = world
         self.scale = world.scale
         self.track_layer = build_track_layer(world, screen.get_size())
+        self._anchor_size: tuple[int, int] | None = None
+        self._anchor: tuple[int, int] = (0, 0)
 
         # Monospace so the clock's digits do not shuffle sideways as they tick.
         mono = "menlo,dejavusansmono,consolas,monospace"
@@ -194,6 +197,96 @@ class Renderer:
         )
         self.screen.blit(glow, (0, 0))
 
+    def draw_preview(self, preview: PreviewFrame | None) -> None:
+        """The camera image, small, in the bottom corner.
+
+        Worth the screen space it costs. A player who cannot see themselves has
+        no way to tell a car that will not turn from a camera that cannot see
+        their hands, and neither can whoever is running the booth. The overlaid
+        dots and the line between them show exactly what the game is steering
+        by, which turns "it's broken" into "step into the light".
+        """
+        if preview is None:
+            return
+
+        height, width = preview.rgb.shape[:2]
+        image = pygame.image.frombuffer(
+            np.ascontiguousarray(preview.rgb).tobytes(), (width, height), "RGB"
+        )
+
+        left, top = self._preview_anchor((width, height))
+        border = max(2, round(2 * self.scale))
+
+        frame = pygame.Rect(left - border, top - border,
+                            width + 2 * border, height + 2 * border)
+        self._panel(frame)
+        self.screen.blit(image, (left, top))
+
+        if preview.has_hands:
+            a = (left + preview.left[0], top + preview.left[1])
+            b = (left + preview.right[0], top + preview.right[1])
+            pygame.draw.line(self.screen, CHECKPOINT, a, b, max(2, round(3 * self.scale)))
+            for point in (a, b):
+                pygame.draw.circle(self.screen, TEXT, point, max(4, round(5 * self.scale)))
+        else:
+            label = self.font_label.render("NO HANDS", True, WARNING)
+            self.screen.blit(label, (left + border, top + border))
+
+    def _preview_anchor(self, size: tuple[int, int]) -> tuple[int, int]:
+        """Find somewhere to put the preview that is not on top of the circuit.
+
+        The obvious answer — a screen corner — is wrong here, because the
+        circuit is authored to fill the window and its bulges reach into every
+        corner. Hand-picking a gap would work until someone moved a control
+        point, so instead this looks for one: it maps where the grass is, then
+        takes the clear position furthest from the middle of the screen, which
+        keeps the panel out of the way of both the car and the centre overlays.
+
+        Worked out once per preview size and remembered.
+        """
+        if self._anchor_size == size:
+            return self._anchor
+        self._anchor_size = size
+        self._anchor = self._search_for_clear_space(size)
+        return self._anchor
+
+    def _search_for_clear_space(self, size: tuple[int, int]) -> tuple[int, int]:
+        width, height = size
+        screen_width, screen_height = self.screen.get_size()
+        margin = round(18 * self.scale)
+        step = max(8, round(16 * self.scale))
+
+        grass = self._grass_mask(step)
+        columns, rows = round(width / step) + 1, round(height / step) + 1
+        centre = (screen_width / 2.0, screen_height / 2.0)
+
+        best: tuple[int, int] | None = None
+        best_distance = -1.0
+        for top in range(margin, screen_height - height - margin + 1, step):
+            for left in range(margin, screen_width - width - margin + 1, step):
+                patch = grass[top // step: top // step + rows,
+                              left // step: left // step + columns]
+                if not patch.all():
+                    continue
+                distance = math.hypot(left + width / 2 - centre[0],
+                                      top + height / 2 - centre[1])
+                if distance > best_distance:
+                    best, best_distance = (left, top), distance
+
+        # No clear space anywhere means the circuit fills the screen. Falling
+        # back to a corner covers some tarmac, which is better than no preview.
+        return best or (screen_width - width - margin, screen_height - height - margin)
+
+    def _grass_mask(self, step: int) -> np.ndarray:
+        """A coarse grid of where the tarmac is not, with room to spare."""
+        screen_width, screen_height = self.screen.get_size()
+        clearance = self.world.track.width / 2.0 + 8.0 * self.scale
+        return np.array([
+            [self.world.track.locate(float(x), float(y)).distance > clearance
+             for x in range(0, screen_width + step, step)]
+            for y in range(0, screen_height + step, step)
+        ])
+
     # --- overlays ------------------------------------------------------------
 
     def draw_centre_message(self, title: str, subtitle: str = "", huge: bool = False) -> None:
@@ -307,31 +400,45 @@ def _speckle_the_grass(layer: pygame.Surface, world: World, size: tuple[int, int
 
 
 def _draw_gates(layer: pygame.Surface, world: World) -> None:
-    """The start line, and a tick at each checkpoint.
+    """The start line, and a tick at each checkpoint gate.
 
-    Checkpoints are drawn faintly and only at the edges. They are lap-validation
+    Gate positions come from `laptimer.gate_progresses`, the same function the
+    validator checks against, so what is drawn and what is judged cannot drift
+    apart — a lap rejected for missing a gate that was never on the track would
+    be impossible for a player to make sense of.
+
+    Gates are drawn faintly and only at the edges. They are lap-validation
     machinery, not obstacles, and anything bold across the track reads as
     something to avoid.
     """
     from . import config
+    from .laptimer import gate_progresses
 
     half_width = world.track.width / 2.0
-    for index in range(config.NUM_CHECKPOINTS):
-        progress = index / config.NUM_CHECKPOINTS
-        x, y, heading = world.track.pose_at(progress)
-        across = (math.cos(heading + math.pi / 2), math.sin(heading + math.pi / 2))
 
-        if index == 0:
-            start = (x - across[0] * half_width, y - across[1] * half_width)
-            end = (x + across[0] * half_width, y + across[1] * half_width)
-            pygame.draw.line(layer, START_LINE, start, end, max(3, round(5 * world.scale)))
-        else:
-            for side in (-1, 1):
-                outer = (x + across[0] * half_width * side, y + across[1] * half_width * side)
-                inner = (x + across[0] * half_width * side * 0.72,
-                         y + across[1] * half_width * side * 0.72)
-                pygame.draw.line(layer, CHECKPOINT, inner, outer,
-                                 max(2, round(4 * world.scale)))
+    x, y, heading = world.track.pose_at(0.0)
+    across = _across(heading)
+    pygame.draw.line(
+        layer, START_LINE,
+        (x - across[0] * half_width, y - across[1] * half_width),
+        (x + across[0] * half_width, y + across[1] * half_width),
+        max(3, round(5 * world.scale)),
+    )
+
+    for progress in gate_progresses(config.NUM_CHECKPOINT_GATES):
+        x, y, heading = world.track.pose_at(progress)
+        across = _across(heading)
+        for side in (-1, 1):
+            outer = (x + across[0] * half_width * side, y + across[1] * half_width * side)
+            inner = (x + across[0] * half_width * side * 0.72,
+                     y + across[1] * half_width * side * 0.72)
+            pygame.draw.line(layer, CHECKPOINT, inner, outer,
+                             max(2, round(4 * world.scale)))
+
+
+def _across(heading: float) -> tuple[float, float]:
+    """Unit vector at right angles to the track, for drawing lines across it."""
+    return math.cos(heading + math.pi / 2), math.sin(heading + math.pi / 2)
 
 
 def _place(shape: list[tuple[float, float]], x: float, y: float,

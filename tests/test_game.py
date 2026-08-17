@@ -37,6 +37,7 @@ class WristAutopilot:
     def __init__(self, game: Game) -> None:
         self.game = game
         self.hands_off = False
+        self.camera_broken = False
 
     def poll(self, dt: float) -> WristSample | None:
         if self.hands_off:
@@ -50,6 +51,13 @@ class WristAutopilot:
         wanted = math.atan2(target_y - car.y, target_x - car.x)
         error = (wanted - car.heading + math.pi) % TAU - math.pi
         return self._bar_at(max(-1.0, min(1.0, error * STEERING_GAIN)))
+
+    def preview(self):
+        return None
+
+    @property
+    def is_healthy(self) -> bool:
+        return not self.camera_broken
 
     def close(self) -> None:
         pass
@@ -117,6 +125,46 @@ class TestArriving:
         press_space()
         run_for(game, COUNTDOWN_SECONDS + 0.2)
         assert game.state is State.RACING
+
+
+class TestStartingByHoldingTheWheel:
+    """The camera-mode onboarding: no button, no calibration, no instructions
+    beyond picking the bar up. Everything here is off in keyboard mode, where
+    "level" would just mean nobody is pressing a key."""
+
+    @pytest.fixture
+    def booth(self, display) -> Game:
+        pygame.event.clear()
+        instance = Game(source=None, screen=display, world=build_world(), auto_start=True)
+        instance.source = WristAutopilot(instance)
+        return instance
+
+    def test_holding_the_bar_level_starts_a_run(self, booth):
+        run_for(booth, config.ATTRACT_HOLD_SECONDS + 0.3)
+        assert booth.state is State.COUNTDOWN
+
+    def test_it_takes_a_moment_rather_than_firing_instantly(self, booth):
+        """A bar being handed between two people passes through level."""
+        run_for(booth, config.ATTRACT_HOLD_SECONDS - 0.4)
+        assert booth.state is State.ATTRACT
+
+    def test_no_hands_means_no_start(self, booth):
+        booth.source.hands_off = True
+        run_for(booth, config.ATTRACT_HOLD_SECONDS + 2.0)
+        assert booth.state is State.ATTRACT
+
+    def test_letting_go_resets_the_hold(self, booth):
+        run_for(booth, config.ATTRACT_HOLD_SECONDS - 0.4)
+        booth.source.hands_off = True
+        run_for(booth, 0.5)
+        booth.source.hands_off = False
+        run_for(booth, 0.3)
+        assert booth.state is State.ATTRACT
+
+    def test_keyboard_mode_does_not_auto_start(self, game):
+        """Nobody pressing an arrow key reads as a perfectly level bar."""
+        run_for(game, config.ATTRACT_HOLD_SECONDS + 2.0)
+        assert game.state is State.ATTRACT
 
 
 class TestDrivingARun:
@@ -193,6 +241,29 @@ class TestWalkingAway:
         assert (game.car.x, game.car.y) == pytest.approx(
             game.world.track.start_pose()[:2]
         )
+
+
+class TestBrokenCamera:
+    """A camera that has stopped must not look like a player doing nothing."""
+
+    def test_the_game_keeps_running_with_a_dead_camera(self, game):
+        game.source.camera_broken = True
+        game.source.hands_off = True
+        run_for(game, 2.0)
+        assert game.step(DT) is True
+
+    def test_a_dead_camera_does_not_start_a_run(self, game):
+        game.source.camera_broken = True
+        run_for(game, config.ATTRACT_HOLD_SECONDS + 2.0)
+        assert game.state is State.ATTRACT
+
+    def test_recovering_the_camera_gets_back_to_normal(self, game):
+        game.source.camera_broken = True
+        run_for(game, 1.0)
+        game.source.camera_broken = False
+        press_space()
+        game.step(DT)
+        assert game.state is State.COUNTDOWN
 
 
 class TestRescue:

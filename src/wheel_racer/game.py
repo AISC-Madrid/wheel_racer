@@ -17,7 +17,7 @@ import pygame
 
 from . import config
 from .car import Car
-from .inputs import InputSource
+from .inputs import InputSource, PreviewFrame
 from .laptimer import LapTimer
 from .recovery import RecoveryMonitor
 from .render import Renderer
@@ -47,10 +47,20 @@ class State(Enum):
 class Game:
     """Owns the car, the clock and the state the booth is in."""
 
-    def __init__(self, source: InputSource, screen: pygame.Surface, world: World) -> None:
+    def __init__(
+        self,
+        source: InputSource,
+        screen: pygame.Surface,
+        world: World,
+        auto_start: bool = False,
+    ) -> None:
         self.source = source
         self.world = world
         self.renderer = Renderer(screen, world)
+        # Whether holding the bar level is enough to start a run. On the camera
+        # it is the entire onboarding; on the keyboard it would fire the moment
+        # nobody was pressing a key, so there it stays off and SPACE starts.
+        self.auto_start = auto_start
 
         self.car = Car(*world.track.start_pose())
         self.steering = SteeringFilter(
@@ -60,7 +70,7 @@ class Game:
             invert=config.STEER_INVERT,
         )
         self.timer = LapTimer(
-            num_checkpoints=config.NUM_CHECKPOINTS,
+            gates=config.NUM_CHECKPOINT_GATES,
             max_progress_step=config.LAP_MAX_PROGRESS_STEP,
         )
         self.recovery = RecoveryMonitor(
@@ -73,9 +83,16 @@ class Game:
         self.splits: list[float] = []
         self.best_run: float | None = None
         self.hands_lost_for = 0.0
+        self.preview: PreviewFrame | None = None
         self.located: TrackPoint = world.track.locate(self.car.x, self.car.y)
         self._state_deadline = 0.0
         self._respawn_flash_until = 0.0
+        self._level_for = 0.0
+
+    @property
+    def hands_present(self) -> bool:
+        """Whether the last poll produced a pair of wrists."""
+        return self.hands_lost_for == 0.0
 
     # --- loop ----------------------------------------------------------------
 
@@ -116,6 +133,7 @@ class Game:
 
     def _read_steering(self, dt: float) -> float:
         """One steering value per frame, whether or not a sample arrived."""
+        self.preview = self.source.preview()
         sample = self.source.poll(dt)
         if sample is None:
             self.hands_lost_for += dt
@@ -124,12 +142,30 @@ class Game:
         return self.steering.update(sample.left, sample.right, dt)
 
     def _advance(self, steering: float, dt: float) -> None:
-        if self.state is State.COUNTDOWN and self.now >= self._state_deadline:
+        if self.state is State.ATTRACT:
+            self._advance_attract(steering, dt)
+        elif self.state is State.COUNTDOWN and self.now >= self._state_deadline:
             self._begin_race()
         elif self.state is State.RACING:
             self._advance_race(steering, dt)
         elif self.state is State.RESULT and self.now >= self._state_deadline:
             self.state = State.ATTRACT
+
+    def _advance_attract(self, steering: float, dt: float) -> None:
+        """Start a run when someone picks the bar up and holds it level.
+
+        This is the whole onboarding. A hesitant passer-by does not have to
+        press anything, be told anything, or be watched failing to calibrate —
+        they take hold of the prop and the game begins, which is what makes it
+        read as an arcade cabinet rather than as a performance.
+        """
+        if not self.auto_start:
+            return
+
+        level = self.hands_present and abs(steering) <= config.ATTRACT_LEVEL_TOLERANCE
+        self._level_for = self._level_for + dt if level else 0.0
+        if self._level_for >= config.ATTRACT_HOLD_SECONDS:
+            self._begin_countdown()
 
     def _advance_race(self, steering: float, dt: float) -> None:
         # One projection per frame, taken before the car moves and reused for
@@ -185,6 +221,7 @@ class Game:
         self.state = State.COUNTDOWN
         self._state_deadline = self.now + COUNTDOWN_SECONDS
         self.splits = []
+        self._level_for = 0.0
         self.steering.reset()
         self.recovery.reset()
         self._reset_car()
@@ -210,12 +247,18 @@ class Game:
 
     def _draw(self, steering: float) -> None:
         self.renderer.draw_world(self.car)
+        self.renderer.draw_preview(self.preview)
+
+        if not self.source.is_healthy:
+            # Not the player's problem to solve, so say so plainly rather than
+            # leaving a queue trying harder at a camera that has gone away.
+            self.renderer.draw_centre_message(
+                "CAMERA LOST", "check the webcam is plugged in"
+            )
+            return
 
         if self.state is State.ATTRACT:
-            self.renderer.draw_centre_message(
-                "HAND WHEEL RACER",
-                f"hold the bar level  ·  space to start  ·  {config.LAPS_PER_RUN} laps",
-            )
+            self.renderer.draw_centre_message("HAND WHEEL RACER", self._attract_prompt())
             return
 
         self.renderer.draw_hud(
@@ -236,12 +279,30 @@ class Game:
         elif self.now < self._respawn_flash_until:
             self.renderer.draw_centre_message("BACK ON TRACK")
 
+    def _attract_prompt(self) -> str:
+        """One line, telling the player the next thing to do and nothing else."""
+        if not self.auto_start:
+            # Naming the mode on screen, because a keyboard-mode window looks
+            # almost exactly like a camera-mode one that has stopped tracking.
+            return f"keyboard mode  ·  space to start  ·  {config.LAPS_PER_RUN} laps"
+        if not self.hands_present:
+            return "take the wheel with both hands"
+        if self._level_for > 0.0:
+            return "hold it there..."
+        return "hold the wheel level to start"
+
     def _countdown_text(self) -> str:
         remaining = self._state_deadline - self.now
         return str(int(remaining) + 1) if remaining > 0 else "GO"
 
 
-def start(source: InputSource, width: int, height: int, fullscreen: bool = False) -> None:
+def start(
+    source: InputSource,
+    width: int,
+    height: int,
+    fullscreen: bool = False,
+    auto_start: bool = False,
+) -> None:
     """Open a window and play until the player quits."""
     pygame.init()
     pygame.display.set_caption("Hand-Wheel Racer — AISC Madrid")
@@ -251,7 +312,7 @@ def start(source: InputSource, width: int, height: int, fullscreen: bool = False
     size = screen.get_size()
 
     try:
-        Game(source, screen, build_world(*size)).run()
+        Game(source, screen, build_world(*size), auto_start=auto_start).run()
     finally:
         source.close()
         pygame.quit()

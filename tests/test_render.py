@@ -6,11 +6,13 @@ rendering crash in a state nobody visits during development (a respawn flash, a
 result panel with one lap in it) would otherwise turn up at the booth.
 """
 
+import numpy as np
 import pygame
 import pytest
 
 from wheel_racer import config
 from wheel_racer.car import Car
+from wheel_racer.inputs import PreviewFrame
 from wheel_racer.render import GRASS, TARMAC, Renderer, build_track_layer, format_time
 from wheel_racer.world import build_world
 
@@ -97,6 +99,69 @@ class TestRendererStates:
     def test_draws_a_partial_result(self, renderer):
         """Reachable if LAPS_PER_RUN is ever changed to one."""
         renderer.draw_result([15.2], best=None, is_best=True)
+
+
+class TestCameraPreview:
+    """The picture-in-picture. Without it a player has no way to tell a car
+    that will not turn from a camera that cannot see them."""
+
+    @pytest.fixture
+    def renderer(self, screen, world):
+        return Renderer(screen, world)
+
+    @staticmethod
+    def frame(left=None, right=None) -> PreviewFrame:
+        rgb = np.full((135, 240, 3), 90, dtype=np.uint8)
+        return PreviewFrame(rgb=rgb, left=left, right=right)
+
+    def test_no_camera_draws_nothing(self, renderer):
+        renderer.draw_preview(None)
+
+    def test_draws_the_image_with_both_wrists(self, renderer):
+        renderer.draw_preview(self.frame(left=(60.0, 70.0), right=(180.0, 90.0)))
+
+    def test_draws_a_warning_when_the_hands_are_lost(self, renderer):
+        renderer.draw_preview(self.frame())
+
+    def test_a_half_sighting_counts_as_no_hands(self, renderer):
+        """One wrist is not enough to steer by, so it must not draw as if it were."""
+        assert not self.frame(left=(60.0, 70.0)).has_hands
+        renderer.draw_preview(self.frame(left=(60.0, 70.0)))
+
+    # 4:3 is what a 640x480 webcam actually gives; 16:9 is what a widescreen one
+    # would. Both have to place, and the taller one is the harder case.
+    PREVIEW_SIZES = [(240, 180), (240, 135), (320, 240)]
+
+    @pytest.mark.parametrize("size", PREVIEW_SIZES)
+    def test_the_preview_never_covers_the_track(self, renderer, world, size):
+        """The circuit fills the window, so every screen corner has tarmac in
+        it — the panel has to find a gap rather than assume one. A preview
+        sitting over the racing line would hide the car behind it."""
+        left, top = renderer._preview_anchor(size)
+
+        for x in np.linspace(left, left + size[0], 11):
+            for y in np.linspace(top, top + size[1], 9):
+                assert not world.track.locate(float(x), float(y)).on_track
+
+    def test_the_preview_keeps_clear_of_the_centre_overlays(self, renderer, screen):
+        """Countdown and result panels are drawn in the middle of the screen."""
+        left, top = renderer._preview_anchor((240, 135))
+        centre_x, centre_y = screen.get_width() / 2, screen.get_height() / 2
+        assert not (left < centre_x < left + 240 and top < centre_y < top + 135)
+
+    def test_the_anchor_is_only_worked_out_once(self, renderer):
+        assert renderer._preview_anchor((240, 135)) == renderer._preview_anchor((240, 135))
+
+    def test_the_preview_is_drawn_where_the_anchor_says(self, renderer, screen):
+        left, top = renderer._preview_anchor((240, 135))
+        screen.fill((0, 0, 0))
+        renderer.draw_preview(self.frame(left=(60.0, 70.0), right=(180.0, 90.0)))
+        assert screen.get_at((left + 120, top + 67)) != pygame.Color(0, 0, 0)
+
+    def test_the_whole_preview_fits_on_screen(self, renderer, screen):
+        left, top = renderer._preview_anchor((240, 135))
+        assert 0 <= left and left + 240 <= screen.get_width()
+        assert 0 <= top and top + 135 <= screen.get_height()
 
 
 class TestFormatTime:

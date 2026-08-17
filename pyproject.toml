@@ -14,7 +14,13 @@ dependencies = [
 [project.optional-dependencies]
 cv = [
     "opencv-python>=4.9",
-    "mediapipe>=0.10.14",
+    # Pinned below 1.0 deliberately. MediaPipe 1.0 removed `mp.solutions.hands`
+    # in favour of the Tasks API, which on macOS arm64 crashes the process on
+    # startup inside its Metal path — and which also needs the landmark model
+    # downloaded separately, an extra thing to go wrong at an outdoor booth.
+    # 0.10.x carries its model inside the package and runs. Do not "upgrade"
+    # this without testing on the machine that will be at the table.
+    "mediapipe>=0.10.14,<1.0",
 ]
 dev = [
     "pytest>=8.0",
