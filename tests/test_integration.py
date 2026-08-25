@@ -134,4 +134,8 @@ class TestGrassCosts:
             clean.update(0.0, True, DT, world.tuning)
             grassy.update(0.0, False, DT, world.tuning)
 
-        assert grassy.x < clean.x
+        # Ground covered, not distance along an axis: which way the grid points
+        # is a property of the circuit and has nothing to do with whether grass
+        # costs time.
+        start = world.track.start_pose()[:2]
+        assert math.dist((grassy.x, grassy.y), start) < math.dist((clean.x, clean.y), start)

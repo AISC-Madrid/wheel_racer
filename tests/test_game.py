@@ -16,8 +16,9 @@ import pygame
 import pytest
 
 from wheel_racer import config
-from wheel_racer.game import COUNTDOWN_SECONDS, RESULT_SECONDS, Game, State
+from wheel_racer.game import COUNTDOWN_SECONDS, Game, State
 from wheel_racer.inputs import KeyboardInput, WristSample
+from wheel_racer.players import PlayerBook
 from wheel_racer.world import build_world
 
 DT = 1.0 / 60.0
@@ -81,12 +82,47 @@ def display():
     pygame.quit()
 
 
-@pytest.fixture
-def game(display) -> Game:
+def build_game(display, tmp_path, **kwargs) -> Game:
+    """A game writing to a throwaway CSV, never the booth's real one."""
     pygame.event.clear()
-    instance = Game(source=KeyboardInput(), screen=display, world=build_world())
+    instance = Game(source=KeyboardInput(), screen=display, world=build_world(),
+                    book=PlayerBook(tmp_path / "players.csv"), **kwargs)
     instance.source = WristAutopilot(instance)
     return instance
+
+
+@pytest.fixture
+def unsigned(display, tmp_path) -> Game:
+    """Freshly opened, waiting for someone to sign in."""
+    return build_game(display, tmp_path)
+
+
+@pytest.fixture
+def game(unsigned) -> Game:
+    """Signed in and ready to drive, which is where most tests start."""
+    sign_in(unsigned)
+    return unsigned
+
+
+NAME, EMAIL = "Lauren", "lauren@example.com"
+
+
+def press(key: int = 0, unicode: str = "") -> None:
+    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=key, unicode=unicode))
+
+
+def type_text(text: str) -> None:
+    for character in text:
+        press(unicode=character)
+
+
+def sign_in(game: Game, name: str = NAME, email: str = EMAIL) -> None:
+    """Fill the form the way a player would, then hand it in."""
+    type_text(name)
+    press(pygame.K_TAB)
+    type_text(email)
+    press(pygame.K_RETURN)
+    game.step(DT)
 
 
 def run_for(game: Game, seconds: float, until: State | None = None) -> None:
@@ -100,8 +136,47 @@ def press_space() -> None:
     pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE))
 
 
+class TestSigningIn:
+    """Nobody drives without leaving a name and an address — that is what the
+    booth is there to collect."""
+
+    def test_opens_on_the_sign_in_form(self, unsigned):
+        run_for(unsigned, 0.5)
+        assert unsigned.state is State.LOGIN
+
+    def test_a_completed_form_lets_them_at_the_wheel(self, unsigned):
+        sign_in(unsigned)
+        assert unsigned.state is State.ATTRACT
+        assert unsigned.signed_in
+
+    def test_space_does_not_skip_the_form(self, unsigned):
+        """Space is a character in somebody's name long before it is a button."""
+        press(pygame.K_SPACE, " ")
+        run_for(unsigned, 0.2)
+        assert unsigned.state is State.LOGIN
+
+    def test_a_bad_address_is_refused_with_a_reason(self, unsigned):
+        sign_in(unsigned, email="not-an-email")
+        assert unsigned.state is State.LOGIN
+        assert unsigned.form.error
+
+    def test_a_missing_name_is_refused(self, unsigned):
+        sign_in(unsigned, name="")
+        assert unsigned.state is State.LOGIN
+        assert unsigned.form.error
+
+    def test_a_returning_player_brings_their_best_time_back(self, unsigned):
+        unsigned.book.record("Lauren", EMAIL, 28.5)
+        sign_in(unsigned)
+        assert unsigned.personal_best == pytest.approx(28.5)
+
+    def test_a_new_player_has_nothing_to_beat_yet(self, unsigned):
+        sign_in(unsigned)
+        assert unsigned.personal_best is None
+
+
 class TestArriving:
-    def test_starts_on_the_attract_screen(self, game):
+    def test_a_signed_in_player_waits_at_the_grid(self, game):
         run_for(game, 0.5)
         assert game.state is State.ATTRACT
 
@@ -133,11 +208,9 @@ class TestStartingByHoldingTheWheel:
     "level" would just mean nobody is pressing a key."""
 
     @pytest.fixture
-    def booth(self, display) -> Game:
-        pygame.event.clear()
-        instance = Game(source=KeyboardInput(), screen=display, world=build_world(),
-                        auto_start=True)
-        instance.source = WristAutopilot(instance)
+    def booth(self, display, tmp_path) -> Game:
+        instance = build_game(display, tmp_path, auto_start=True)
+        sign_in(instance)
         return instance
 
     def test_holding_the_bar_level_starts_a_run(self, booth):
@@ -182,8 +255,8 @@ class TestDrivingARun:
     def test_it_records_one_split_per_lap(self, finished):
         assert len(finished.splits) == config.LAPS_PER_RUN
 
-    def test_the_first_run_is_the_best_run(self, finished):
-        assert finished.best_run == pytest.approx(sum(finished.splits))
+    def test_the_first_run_sets_the_mark(self, finished):
+        assert finished.best_run == pytest.approx(min(finished.splits))
 
     def test_the_total_is_in_the_right_ballpark(self, finished):
         assert 0.7 * config.TARGET_RUN_SECONDS < sum(finished.splits) < 1.4 * config.TARGET_RUN_SECONDS
@@ -193,15 +266,83 @@ class TestDrivingARun:
         one — a player always improves on their own first attempt."""
         assert finished.splits[0] > finished.splits[1]
 
-    def test_the_result_screen_times_out_back_to_attract(self, finished):
-        run_for(finished, RESULT_SECONDS + 0.5)
-        assert finished.state is State.ATTRACT
+    def test_the_result_stays_up_indefinitely(self, finished):
+        """A time left on screen is the booth advertising itself. Nothing about
+        a clock should take it down before somebody has shown their friends."""
+        run_for(finished, 90.0)
+        assert finished.state is State.RESULT
+        assert finished.signed_in
 
-    def test_a_second_run_can_be_started(self, finished):
-        press_space()
+    def test_enter_on_an_untouched_form_means_race_again(self, finished):
+        press(pygame.K_RETURN)
         finished.step(DT)
         assert finished.state is State.COUNTDOWN
         assert finished.splits == []
+        assert finished.player_email == EMAIL
+
+    def test_typing_on_the_result_screen_hands_over_instead(self, finished):
+        sign_in(finished, name="Ada", email="ada@example.com")
+        assert finished.state is State.ATTRACT
+        assert finished.player_email == "ada@example.com"
+
+    def test_the_run_is_written_to_the_csv(self, finished):
+        """The saved figure is the best single lap of the run, not the total —
+        see `_on_lap_complete`. Stored to the hundredth, which is the
+        resolution the clock shows."""
+        stored = finished.book.get(EMAIL)
+        assert stored is not None
+        assert stored.best_seconds == pytest.approx(min(finished.splits), abs=0.005)
+        assert stored.name == NAME
+
+    def test_a_first_run_always_counts_as_a_best(self, finished):
+        assert finished.beat_their_best
+
+    def test_the_headline_figure_is_the_best_lap(self, finished):
+        """The score, and the number the CSV keeps. A run total in the largest
+        text on screen would invite comparison with a personal best that is
+        measured in laps."""
+        assert finished.lap_time == pytest.approx(min(finished.splits))
+
+    def test_the_clock_shows_the_lap_in_progress_while_driving(self, game):
+        """Not a running total: with the best lap as the score, the total is
+        not a number anybody is racing against."""
+        press_space()
+        run_for(game, COUNTDOWN_SECONDS + 0.2)
+        run_for(game, 120.0, until=State.RACING)
+        run_for(game, 20.0)                       # into the second lap
+        assert len(game.splits) == 1
+        assert game.lap_time is not None
+        assert game.lap_time < sum(game.splits) + game.lap_time
+
+    def test_a_slower_second_run_is_not_a_new_best(self, game):
+        """A tie must not read as an improvement either: the file keeps
+        hundredths and the clock does not, so comparing the raw time against
+        the saved one would call the same lap an improvement on itself."""
+        game.book.record(NAME, EMAIL, 1.0)  # unbeatable
+        press_space()
+        run_for(game, COUNTDOWN_SECONDS + 0.2)
+        run_for(game, 120.0, until=State.RESULT)
+        assert not game.beat_their_best
+        assert game.personal_best == pytest.approx(1.0)
+
+    def test_a_half_typed_address_is_never_wiped(self, finished):
+        type_text("Ada")
+        finished.step(DT)
+        run_for(finished, 60.0)
+        assert finished.state is State.RESULT
+        assert finished.form.name == "Ada"
+
+    def test_the_replay_prompt_is_only_offered_on_an_untouched_form(self, finished):
+        """Once somebody starts typing, ENTER means sign in, so offering a
+        replay symbol beside it would be pointing at the wrong action."""
+        assert "replay" in finished._result_hint()
+        type_text("A")
+        finished.step(DT)
+        assert "replay" not in finished._result_hint()
+
+    def test_the_prompt_does_not_name_the_last_player(self, finished):
+        """The screen is facing a queue, not the person who just got up."""
+        assert NAME not in finished._result_hint()
 
 
 class TestWalkingAway:

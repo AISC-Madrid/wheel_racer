@@ -14,6 +14,7 @@ from wheel_racer import config
 from wheel_racer.car import Car
 from wheel_racer.effects import DustCloud, TyreTrail
 from wheel_racer.inputs import PreviewFrame
+from wheel_racer.login import LoginForm
 from wheel_racer.render import Renderer, format_time
 from wheel_racer.trackart import GRASS, TARMAC, build_track_layer
 from wheel_racer.world import build_world
@@ -116,16 +117,6 @@ class TestRendererStates:
     def test_draws_the_attract_screen(self, renderer):
         renderer.draw_centre_message("HAND WHEEL RACER", "hold the bar level")
 
-    def test_draws_a_winning_result(self, renderer):
-        renderer.draw_result([15.2, 14.8], best=30.0, is_best=True)
-
-    def test_draws_a_losing_result(self, renderer):
-        renderer.draw_result([15.2, 14.8], best=28.0, is_best=False)
-
-    def test_draws_a_partial_result(self, renderer):
-        """Reachable if LAPS_PER_RUN is ever changed to one."""
-        renderer.draw_result([15.2], best=None, is_best=True)
-
 
 class TestCameraPreview:
     """The picture-in-picture. Without it a player has no way to tell a car
@@ -199,3 +190,63 @@ class TestFormatTime:
 
     def test_shows_a_placeholder_when_there_is_no_time(self):
         assert format_time(None) == "--.--"
+
+
+class TestLoginPanel:
+    """Every shape the sign-in panel takes, drawn once. It is the first thing
+    anyone sees, so a crash in one of these states would be a crash on arrival."""
+
+    @pytest.fixture
+    def renderer(self, screen, world):
+        return Renderer(screen, world)
+
+    @pytest.fixture
+    def form(self) -> LoginForm:
+        return LoginForm()
+
+    def test_draws_an_empty_form(self, renderer, form):
+        renderer.draw_login(form, headline="HAND WHEEL RACER",
+                            subhead="sign in to play", hint="ENTER to start")
+
+    def test_draws_a_partly_typed_form(self, renderer, form):
+        for character in "Lauren":
+            form.handle(pygame.event.Event(pygame.KEYDOWN, key=0, unicode=character))
+        renderer.draw_login(form, headline="HAND WHEEL RACER")
+
+    def test_draws_an_error(self, renderer, form):
+        form.submit()
+        assert form.error
+        renderer.draw_login(form, headline="HAND WHEEL RACER")
+
+    def test_draws_a_result(self, renderer, form):
+        renderer.draw_login(form, headline="30.22", subhead="lap 1 15.30 · lap 2 14.92",
+                            hint="ENTER to replay", celebrate=True)
+
+    def test_draws_the_replay_symbol(self, renderer, form, screen):
+        """Drawn rather than typed, because the obvious character for it is
+        missing from plenty of monospace fonts and would show as a box."""
+        screen.fill((0, 0, 0))
+        renderer.draw_login(form, headline="30.22", hint="ENTER to replay", replay=True)
+        marked = sum(screen.get_at((x, y))[:3] != (0, 0, 0)
+                     for x in range(screen.get_width())
+                     for y in range(screen.get_height()))
+        assert marked > 0
+
+    def test_the_symbol_makes_room_for_itself(self, renderer, form):
+        """It sits beside the hint, so the panel has to widen for it rather
+        than letting the icon and the text overlap. The hint here is long
+        enough to drive the width — a short one hits the minimum panel width
+        and the allowance would never show."""
+        hint = "ENTER to replay  ·  or type to sign in and take the wheel yourself"
+        plain = renderer._login_width(form, "30.22", "", hint)
+        with_icon = renderer._login_width(form, "30.22", "", hint, replay=True)
+        assert with_icon > plain
+        assert with_icon - plain >= renderer._replay_icon_size()
+
+    def test_a_long_hint_widens_the_panel_rather_than_overflowing(self, renderer, form):
+        """A returning player's name and address both land in these lines."""
+        short = renderer._login_width(form, "30.22", "", "")
+        long = renderer._login_width(
+            form, "30.22", "",
+            "ENTER to race again as Bartholomew  ·  or type to hand over")
+        assert long > short

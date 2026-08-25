@@ -6,6 +6,8 @@ properties that make it playable. If an edit to CONTROL_POINTS breaks one, the
 edit made the track worse, not the test wrong.
 """
 
+import math
+
 import numpy as np
 import pytest
 
@@ -86,6 +88,39 @@ class TestCircuitIsPlayable:
         span = centerline.max(axis=0) - centerline.min(axis=0)
         assert span[0] > 0.75 * track_data.DESIGN_WIDTH
         assert span[1] > 0.70 * track_data.DESIGN_HEIGHT
+
+
+class TestWhichWayRound:
+    """Direction is nothing but the order of the centreline points, which makes
+    it easy to reverse and just as easy to reverse by accident."""
+
+    def test_the_car_leaves_the_grid_heading_up_the_screen(self):
+        """The readable way round. Setting off downwards puts the first corner
+        under the player before they have worked out which way the wheel moves
+        the car."""
+        world = build_world()
+        _, _, heading = world.track.start_pose()
+        assert math.sin(heading) < 0  # screen y grows downward
+
+    def test_the_circuit_runs_clockwise_on_screen(self):
+        points = track_data.design_centerline()
+        x, y = points[:, 0], points[:, 1]
+        signed_area = 0.5 * np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)
+        assert signed_area > 0  # positive is clockwise where y grows downward
+
+    def test_reversing_keeps_the_start_line_where_it_is(self, centerline):
+        """Reversing the array outright would move the start to the far end of
+        the lap, taking the chequered line, the grid and the logo with it."""
+        assert track_data._driven_backwards(centerline)[0] == pytest.approx(centerline[0])
+
+    def test_reversing_changes_nothing_but_the_order(self, centerline):
+        backwards = track_data._driven_backwards(centerline)
+        assert len(backwards) == len(centerline)
+        assert sorted(map(tuple, backwards)) == sorted(map(tuple, centerline))
+
+    def test_reversing_actually_reverses(self, centerline):
+        backwards = track_data._driven_backwards(centerline)
+        assert backwards[1] == pytest.approx(centerline[-1])
 
 
 class TestScaling:

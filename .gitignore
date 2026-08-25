@@ -220,5 +220,5 @@ __marimo__/
 # Booth data — holds participant names and email addresses. Never commit it.
 data/
 
-
-resources/
+# macOS Finder metadata — local clutter, never useful in a repo.
+.DS_Store
