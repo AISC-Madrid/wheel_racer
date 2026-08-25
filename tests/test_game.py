@@ -16,7 +16,8 @@ import pygame
 import pytest
 
 from wheel_racer import config
-from wheel_racer.game import COUNTDOWN_SECONDS, Game, State
+from wheel_racer.game import (COUNTDOWN_SECONDS, Game, State,
+                             _is_fullscreen_shortcut)
 from wheel_racer.inputs import KeyboardInput, WristSample
 from wheel_racer.players import PlayerBook
 from wheel_racer.world import build_world
@@ -426,3 +427,70 @@ class TestRescue:
         game.car.reset(640.0, 360.0, heading=0.0, speed=0.0)
         run_for(game, config.RESPAWN_AFTER_OFF_TRACK_S + 0.5)
         assert game.car.speed > 0.0
+
+
+class TestChangingTheWindow:
+    """The booth screen is not known in advance, so the window has to be free to
+    change size — including mid-run, if somebody goes fullscreen while a player
+    is driving. The circuit is authored in a fixed design space and scaled to
+    the window, so a resize must move the picture and nothing else.
+    """
+
+    @staticmethod
+    def _bigger(size=(1920, 1080)) -> pygame.Surface:
+        """A larger surface, without touching the shared display mode."""
+        return pygame.Surface(size)
+
+    def test_the_car_stays_where_it_was_on_the_circuit(self, game):
+        press_space()
+        run_for(game, COUNTDOWN_SECONDS + 4.0)
+        before = game.world.track.locate(game.car.x, game.car.y).progress
+
+        game.adopt_display(self._bigger())
+
+        after = game.world.track.locate(game.car.x, game.car.y).progress
+        assert after == pytest.approx(before, abs=1e-3)
+
+    def test_a_bigger_window_rescales_the_car(self, game):
+        """Speeds are pixels per second and the pixels just changed size."""
+        press_space()
+        run_for(game, COUNTDOWN_SECONDS + 4.0)
+        share_of_top = game.car.speed / game.world.tuning.top_speed
+
+        game.adopt_display(self._bigger())
+
+        assert game.world.scale > 1.0
+        assert game.car.speed / game.world.tuning.top_speed == pytest.approx(share_of_top)
+
+    def test_the_track_still_fits_the_window(self, game):
+        game.adopt_display(self._bigger())
+        points = game.world.track.points
+        assert points[:, 0].min() >= 0.0 and points[:, 0].max() <= 1920.0
+        assert points[:, 1].min() >= 0.0 and points[:, 1].max() <= 1080.0
+
+    def test_a_resize_mid_run_still_finishes_the_run(self, game):
+        """Lap progress is a fraction of the way round, so it does not care how
+        big the screen is — the checkpoint validation must survive the change."""
+        press_space()
+        run_for(game, COUNTDOWN_SECONDS + 3.0)
+        game.adopt_display(self._bigger())
+
+        run_for(game, 120.0, until=State.RESULT)
+        assert game.state is State.RESULT
+        assert len(game.splits) == config.LAPS_PER_RUN
+
+    def test_a_letter_f_is_typed_rather_than_going_fullscreen(self, unsigned):
+        """The shortcut is read before the form, so it must not be a bare key."""
+        type_text("Fernando")
+        unsigned.step(DT)
+        assert unsigned.form.fields[0].value == "Fernando"
+
+    def test_the_modified_shortcut_is_recognised(self):
+        plain = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_f, unicode="f", mod=0)
+        held = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_f, unicode="f",
+                                  mod=pygame.KMOD_LMETA)
+        function_key = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F11, mod=0)
+
+        assert not _is_fullscreen_shortcut(plain)
+        assert _is_fullscreen_shortcut(held)
+        assert _is_fullscreen_shortcut(function_key)

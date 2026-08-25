@@ -60,7 +60,8 @@ def main() -> None:
                         help="do not flip the camera frame horizontally")
     parser.add_argument("--width", type=int, default=config.WINDOW_WIDTH)
     parser.add_argument("--height", type=int, default=config.WINDOW_HEIGHT)
-    parser.add_argument("--fullscreen", action="store_true")
+    parser.add_argument("--fullscreen", action="store_true",
+                        help="open at the desktop resolution (F11 toggles in game)")
     args = parser.parse_args()
 
     source, using_camera = build_source(args)

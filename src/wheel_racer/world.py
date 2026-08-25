@@ -33,6 +33,16 @@ class World:
     tuning: CarTuning
     scale: float
     """Design pixels to world pixels. 1.0 at the authored 1280x720."""
+    offset: tuple[float, float] = (0.0, 0.0)
+    """Where the design space starts, once it is centred in the window."""
+
+    def to_design(self, x: float, y: float) -> tuple[float, float]:
+        """A world point back in design space, so it survives a resize."""
+        return ((x - self.offset[0]) / self.scale, (y - self.offset[1]) / self.scale)
+
+    def from_design(self, x: float, y: float) -> tuple[float, float]:
+        """A design point placed in this world."""
+        return (x * self.scale + self.offset[0], y * self.scale + self.offset[1])
 
     @property
     def predicted_lap_seconds(self) -> float:
@@ -81,7 +91,7 @@ def build_world(
     )
 
     track = track_data.build_track(config.TRACK_WIDTH, scale=scale, offset=offset)
-    return World(track=track, tuning=scaled_tuning(scale), scale=scale)
+    return World(track=track, tuning=scaled_tuning(scale), scale=scale, offset=offset)
 
 
 def scaled_tuning(scale: float) -> CarTuning:

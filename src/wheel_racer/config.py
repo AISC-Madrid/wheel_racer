@@ -15,6 +15,10 @@ The tuning order that actually works, from PROJECT.md:
 
 # --- Window -----------------------------------------------------------------
 
+# The size the window opens at, not a size the game is tied to. The circuit is
+# authored in a fixed design space and scaled to whatever the window turns out
+# to be, so the window is resizable, `run.py --fullscreen` opens at the
+# desktop's own resolution, and F11 (or Cmd/Ctrl-F) switches at any time.
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
 TARGET_FPS = 60

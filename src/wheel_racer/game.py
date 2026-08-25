@@ -48,6 +48,26 @@ MAX_FRAME_SECONDS = 0.05
 COUNTDOWN_SECONDS = 3.0
 RESPAWN_FLASH_SECONDS = 1.2
 
+# Smallest window we will build a circuit in. Nothing breaks above this; below
+# it the fonts bottom out at their minimum size and the panels start to overlap,
+# and at zero width the scale would be zero and the maths would divide by it.
+MIN_WINDOW = (640, 360)
+
+# The fullscreen shortcut, checked ahead of the sign-in form so it cannot be
+# swallowed by whoever is typing. F11 is the convention, but macOS usually eats
+# it before any application sees it, so Cmd-F and Ctrl-F work too — and they
+# need the modifier precisely because a bare F belongs to whoever is spelling
+# their name.
+FULLSCREEN_MODIFIERS = pygame.KMOD_META | pygame.KMOD_CTRL
+
+
+def _is_fullscreen_shortcut(event: pygame.event.Event) -> bool:
+    if event.type != pygame.KEYDOWN:
+        return False
+    if event.key == pygame.K_F11:
+        return True
+    return event.key == pygame.K_f and bool(event.mod & FULLSCREEN_MODIFIERS)
+
 
 class State(Enum):
     LOGIN = auto()
@@ -67,10 +87,16 @@ class Game:
         world: World,
         auto_start: bool = False,
         book: PlayerBook | None = None,
+        fullscreen: bool = False,
     ) -> None:
         self.source = source
         self.world = world
+        self.screen = screen
         self.renderer = Renderer(screen, world)
+        self.fullscreen = fullscreen
+        # The size to come back to when fullscreen is switched off again.
+        self._windowed_size = screen.get_size() if not fullscreen else (
+            config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
         # Whether holding the bar level is enough to start a run. On the camera
         # it is the entire onboarding; on the keyboard it would fire the moment
         # nobody was pressing a key, so there it stays off and SPACE starts.
@@ -150,6 +176,15 @@ class Game:
                 return False
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 return False
+
+            # Display keys are read before the form gets a look in, so the
+            # window can be resized while somebody is halfway through signing in.
+            if _is_fullscreen_shortcut(event):
+                self.set_fullscreen(not self.fullscreen)
+                continue
+            if event.type == pygame.VIDEORESIZE and not self.fullscreen:
+                self.adopt_display(open_display(event.size, fullscreen=False))
+                continue
 
             if self.state in (State.LOGIN, State.RESULT):
                 # Every other key belongs to the form while it is up, including
@@ -319,6 +354,53 @@ class Game:
         self.trail.clear()
         self.dust.clear()
 
+    # --- display -------------------------------------------------------------
+
+    def set_fullscreen(self, fullscreen: bool) -> None:
+        """Switch between fullscreen and the last windowed size."""
+        if fullscreen == self.fullscreen:
+            return
+        self.fullscreen = fullscreen
+        self.adopt_display(
+            open_display(None if fullscreen else self._windowed_size, fullscreen)
+        )
+
+    def adopt_display(self, screen: pygame.Surface) -> None:
+        """Rebuild the circuit for a new window size, without losing the run.
+
+        The circuit is authored in a fixed design space, so a resize is only a
+        change of scale: everything is rebuilt at the new one and the car is put
+        back on the same point of the same corner it was already on. Its speed
+        is rescaled with it, because speeds are pixels per second and the pixels
+        just changed size — leave it alone and the car briefly drives at the
+        wrong pace for the track it is on.
+
+        Lap timing is untouched. Progress is a fraction of the way round, which
+        does not know how big the screen is, so a resize mid-run neither breaks
+        the checkpoint validation nor gives anyone a faster lap.
+        """
+        design = self.world.to_design(self.car.x, self.car.y)
+        old_scale = self.world.scale
+
+        self.screen = screen
+        if not self.fullscreen:
+            # Remembered from the surface rather than from the drag, so that
+            # leaving fullscreen comes back to the size actually in use — the
+            # window has a minimum, and a drag below it does not get honoured.
+            self._windowed_size = screen.get_size()
+        self.world = build_world(*screen.get_size())
+        self.renderer = Renderer(screen, self.world)
+
+        x, y = self.world.from_design(*design)
+        self.car.reset(x, y, self.car.heading,
+                       self.car.speed * self.world.scale / old_scale)
+        self.located = self.world.track.locate(self.car.x, self.car.y)
+        # Both are stored in world pixels, so at the new scale they would be
+        # drawn in the wrong places. There is nothing to rescale them from that
+        # is worth the code — a resize is not something that happens mid-corner.
+        self.trail.clear()
+        self.dust.clear()
+
     # --- drawing -------------------------------------------------------------
 
     @property
@@ -415,6 +497,27 @@ class Game:
         return str(int(remaining) + 1) if remaining > 0 else "GO"
 
 
+def open_display(size: tuple[int, int] | None, fullscreen: bool) -> pygame.Surface:
+    """Open, or reopen, the game window.
+
+    Fullscreen deliberately asks for ``(0, 0)``, which SDL reads as "whatever
+    the desktop is already at". Naming a size instead puts the display through
+    a mode change to something smaller and stretches it back up, which on a
+    booth laptop is a soft, faintly blurry picture. The game scales itself to
+    any window, so it would rather have the real pixels.
+
+    Windowed mode is resizable, because the booth screen is not known in
+    advance and dragging a corner is a faster way to find the size that suits
+    a stand than restarting with different numbers.
+    """
+    if fullscreen:
+        return pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    width, height = size or (config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
+    return pygame.display.set_mode(
+        (max(width, MIN_WINDOW[0]), max(height, MIN_WINDOW[1])), pygame.RESIZABLE
+    )
+
+
 def start(
     source: InputSource,
     width: int,
@@ -430,12 +533,11 @@ def start(
     # than forty.
     pygame.key.set_repeat(400, 40)
 
-    flags = pygame.FULLSCREEN if fullscreen else 0
-    screen = pygame.display.set_mode((width, height), flags)
-    size = screen.get_size()
+    screen = open_display((width, height), fullscreen)
 
     try:
-        Game(source, screen, build_world(*size), auto_start=auto_start).run()
+        Game(source, screen, build_world(*screen.get_size()),
+             auto_start=auto_start, fullscreen=fullscreen).run()
     finally:
         source.close()
         pygame.quit()
