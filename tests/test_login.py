@@ -36,14 +36,14 @@ def form() -> LoginForm:
 
 class TestTyping:
     def test_characters_land_in_the_focused_field(self, form):
-        typed(form, "Lauren")
-        assert form.name == "Lauren"
+        typed(form, "john")
+        assert form.name == "john"
 
     def test_tab_moves_to_the_next_field(self, form):
-        typed(form, "Lauren")
+        typed(form, "john")
         form.handle(key(pygame.K_TAB))
-        typed(form, "lauren@example.com")
-        assert (form.name, form.email) == ("Lauren", "lauren@example.com")
+        typed(form, "john@example.com")
+        assert (form.name, form.email) == ("john", "john@example.com")
 
     def test_tab_wraps_round(self, form):
         form.handle(key(pygame.K_TAB))
@@ -51,9 +51,9 @@ class TestTyping:
         assert form.focused == NAME
 
     def test_backspace_deletes(self, form):
-        typed(form, "Laurenn")
+        typed(form, "johnn")
         form.handle(key(pygame.K_BACKSPACE))
-        assert form.name == "Lauren"
+        assert form.name == "john"
 
     def test_backspace_on_an_empty_field_is_harmless(self, form):
         form.handle(key(pygame.K_BACKSPACE))
@@ -67,8 +67,8 @@ class TestTyping:
     def test_an_address_may_not(self, form):
         """A trailing space is invisible and would split one person into two."""
         form.focused = EMAIL
-        typed(form, "lauren @example.com")
-        assert form.email == "lauren@example.com"
+        typed(form, "john @example.com")
+        assert form.email == "john@example.com"
 
     def test_control_characters_are_ignored(self, form):
         form.handle(key(character="\x00"))
@@ -91,29 +91,29 @@ class TestTyping:
 
 class TestSubmitting:
     def test_enter_moves_on_from_a_filled_name(self, form):
-        typed(form, "Lauren")
+        typed(form, "john")
         form.handle(key(pygame.K_RETURN))
         assert form.focused == EMAIL
         assert not form.submitted
 
     def test_enter_signs_in_from_a_filled_address(self, form):
-        typed(form, "Lauren")
+        typed(form, "john")
         form.handle(key(pygame.K_TAB))
-        typed(form, "lauren@example.com")
+        typed(form, "john@example.com")
         form.handle(key(pygame.K_RETURN))
         assert form.submitted
 
     def test_a_bad_address_refuses_and_says_why(self, form):
-        typed(form, "Lauren")
+        typed(form, "john")
         form.handle(key(pygame.K_TAB))
-        typed(form, "lauren-at-example")
+        typed(form, "john-at-example")
         form.handle(key(pygame.K_RETURN))
         assert not form.submitted
         assert form.error
 
     def test_refusing_puts_the_cursor_on_the_offending_field(self, form):
         form.focused = EMAIL
-        typed(form, "lauren@example.com")
+        typed(form, "john@example.com")
         form.submit()
         assert form.focused == NAME  # the empty one
 
@@ -124,8 +124,8 @@ class TestSubmitting:
         assert form.error is None
 
     def test_values_are_trimmed(self, form):
-        typed(form, "  Lauren  ")
-        assert form.name == "Lauren"
+        typed(form, "  john  ")
+        assert form.name == "john"
 
 
 class TestEmptiness:
@@ -139,9 +139,9 @@ class TestEmptiness:
         assert not form.is_empty
 
     def test_clearing_empties_it(self, form):
-        typed(form, "Lauren")
+        typed(form, "john")
         form.handle(key(pygame.K_TAB))
-        typed(form, "lauren@example.com")
+        typed(form, "john@example.com")
         form.clear()
         assert form.is_empty
         assert form.focused == NAME
@@ -154,23 +154,30 @@ class TestValidation:
     a queue waiting is a far worse failure than accepting an odd one."""
 
     @pytest.mark.parametrize("address", [
-        "lauren@example.com",
-        "lauren.gallego-ropero@alumnos.uc3m.es",   # the club's own domain shape
+        "john@example.com",
+        "john.gallego-linares@alumnos.uc3m.es",   # the club's own domain shape
         "a+tag@sub.domain.co.uk",                  # plus-tags and subdomains
         "123@example.org",
         "o'brien@example.ie",                      # apostrophes are legal
         "maría@correo.es",                         # and so are accents, in Spain
         "x@y.io",                                  # short but perfectly valid
+        # There are over a thousand real top-level domains, so the ending is
+        # checked for shape rather than against a list of the ones we happened
+        # to think of. These are here to keep it that way.
+        "ander@ikasle.ehu.eus",                    # Basque
+        "jordi@example.cat",                       # Catalan
+        "sam@startup.dev",
+        "kim@example.xyz",
     ])
     def test_real_addresses_are_accepted(self, address):
         assert email_error(address) is None
 
     @pytest.mark.parametrize("address,because", [
         ("", "left blank"),
-        ("lauren", "no @ at all"),
+        ("john", "no @ at all"),
         ("a@@b.com", "two @"),
         ("@example.com", "nothing before the @"),
-        ("lauren@", "nothing after the @"),
+        ("john@", "nothing after the @"),
         ("a@b", "no dot in the domain"),
         ("a@b.", "trailing dot"),
         ("a@b..com", "two dots in the domain"),
@@ -191,9 +198,9 @@ class TestValidation:
     def test_the_message_says_what_is_wrong(self):
         """A generic "invalid email" leaves someone staring at their own
         address unable to see the problem."""
-        for address, expected in [("lauren.example.com", "@"),
+        for address, expected in [("john.example.com", "@"),
                                   ("@example.com", "before"),
-                                  ("lauren@", "after")]:
+                                  ("john@", "after")]:
             message = email_error(address)
             assert message is not None and expected in message
 

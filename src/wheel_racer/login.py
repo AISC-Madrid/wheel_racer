@@ -124,8 +124,13 @@ def _domain_error(domain: str) -> str | None:
         return "part of that domain is too long"
     if any(label.startswith("-") or label.endswith("-") for label in labels):
         return "a domain piece cannot start or end with a dash"
-    if labels[-1] not in ("com", "es", "edu", "org", "net"):
-        return "email must end in .com, .es ..."
+    # Checked for shape, not against a list of known endings. There are over a
+    # thousand real top-level domains and a list of the handful we thought of
+    # turns every other one into a person being told their own address is wrong
+    # with a queue behind them — which is the exact failure this module's
+    # docstring says to avoid. Two or more letters is what separates an ending
+    # from a typo; `isalpha` accepts non-ASCII, so an internationalised domain
+    # gets in too.
     ending = labels[-1]
     if len(ending) < 2 or not ending.isalpha():
         return "the ending does not look right — try .com or .es"
