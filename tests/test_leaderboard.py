@@ -12,8 +12,9 @@ import time
 import pygame
 import pytest
 
-from wheel_racer.leaderboard import (ROWS, TAKEOVER_SECONDS, LeaderboardScreen,
-                                     standings)
+from wheel_racer.leaderboard import (PODIUM_PLACES, ROWS, TAKEOVER_SECONDS,
+                                     BoardSource, LeaderboardScreen, standings)
+from wheel_racer.players import PlayerBook
 from wheel_racer.live import STALE_AFTER_SECONDS, LiveState
 from wheel_racer.players import Player
 
@@ -182,3 +183,131 @@ class TestTheNewLeaderTakeover:
         for _ in range(120):
             board.draw(standings(FIELD), driving(), len(FIELD), 1 / 60)
         assert not len(board.fireworks)
+
+
+def settle(board: LeaderboardScreen, rows, live=None, seconds: float = 1.5) -> None:
+    """Draw until every row has arrived where it belongs."""
+    for _ in range(round(seconds * 60)):
+        board.draw(rows, live, len(rows), 1 / 60)
+
+
+class TestRowsMoving:
+    """A promotion has to be something you watch happen.
+
+    The whole reason for animating is that somebody looking up at the wrong
+    moment should still see that the board changed — a tower that simply
+    redraws in a new order has told nobody anything.
+    """
+
+    def test_the_board_does_not_animate_itself_into_existence(self, board):
+        """Opening the screen is not eight simultaneous promotions."""
+        board.draw(standings(FIELD), None, len(FIELD), 1 / 60)
+        assert all(m.slot == m.target for m in board._motion.values())
+        assert all(m.flash == 0.0 for m in board._motion.values())
+
+    def test_a_row_slides_to_its_new_place(self, board):
+        settle(board, standings(FIELD))
+        faster = [Player("Ana", "ana@example.com", 14.0)] + FIELD[:3]
+        rows = standings(sorted(faster, key=lambda p: p.best_seconds))
+
+        board.draw(rows, None, len(rows), 1 / 60)
+        ana = board._motion[rows[0].key]
+        assert ana.target == 0
+        assert ana.slot > 0.0, "should still be on its way, not teleported"
+
+        settle(board, rows)
+        assert board._motion[rows[0].key].slot == 0.0
+
+    def test_climbing_into_the_top_three_lights_the_row(self, board):
+        settle(board, standings(FIELD))
+        promoted = FIELD[:2] + [Player("Luis", "luis@example.com", 14.9)]
+        rows = standings(sorted(promoted, key=lambda p: p.best_seconds))
+
+        board.draw(rows, None, len(rows), 1 / 60)
+        assert board._motion[rows[2].key].flash > 0.0
+
+    def test_a_new_arrival_straight_into_the_top_three_lights_up(self, board):
+        settle(board, standings(FIELD))
+        rows = standings(sorted(FIELD + [Player("Diego", "d@example.com", 14.5)],
+                                key=lambda p: p.best_seconds))
+        board.draw(rows, None, len(rows), 1 / 60)
+
+        diego = next(r for r in rows if r.name == "DIEGO")
+        assert board._motion[diego.key].flash > 0.0
+
+    def test_improving_outside_the_top_three_does_not(self, board):
+        """Otherwise the effect fires several times an hour and stops meaning
+        anything by mid-afternoon."""
+        settle(board, standings(FIELD))
+        crowd = FIELD + [Player(f"P{i}", f"{i}@example.com", 16.0 + i)
+                         for i in range(4)]
+        settle(board, standings(sorted(crowd, key=lambda p: p.best_seconds)))
+
+        # P3 improves from last place to fifth — a real gain, no podium.
+        crowd[-1] = Player("P3", "3@example.com", 15.3)
+        rows = standings(sorted(crowd, key=lambda p: p.best_seconds))
+        board.draw(rows, None, len(rows), 1 / 60)
+
+        moved = next(r for r in rows if r.name == "P3")
+        assert board._motion[moved.key].flash == 0.0
+
+    def test_the_light_goes_out_on_its_own(self, board):
+        settle(board, standings(FIELD))
+        promoted = FIELD[:2] + [Player("Luis", "luis@example.com", 14.9)]
+        rows = standings(sorted(promoted, key=lambda p: p.best_seconds))
+        board.draw(rows, None, len(rows), 1 / 60)
+
+        settle(board, rows, seconds=5.0)
+        assert all(m.flash == 0.0 for m in board._motion.values())
+
+    def test_two_players_with_the_same_first_name_are_different_rows(self):
+        """Two Martas at a student fair is not a hypothetical, and keyed by
+        name the second would inherit the first one's row."""
+        rows = standings([Player("Marta Ruiz", "marta.r@example.com", 14.2),
+                          Player("Marta Lopez", "marta.l@example.com", 15.1)])
+        assert rows[0].name == rows[1].name == "MARTA"
+        assert rows[0].key != rows[1].key
+
+    def test_rows_pushed_off_the_board_are_forgotten(self, board):
+        """An afternoon's worth of players must not accumulate in memory for
+        the sake of eight visible rows."""
+        crowd = [Player(f"P{i}", f"{i}@example.com", 14.0 + i * 0.2)
+                 for i in range(40)]
+        for size in (12, 24, 40):
+            everyone = sorted(crowd[:size], key=lambda p: p.best_seconds)
+            settle(board, standings(everyone[:ROWS]), seconds=0.3)
+        assert len(board._motion) <= ROWS
+
+    def test_the_podium_is_the_top_three(self):
+        assert PODIUM_PLACES == 3
+
+
+class TestReadingThePlayerBook:
+    def test_an_unchanged_file_is_not_reparsed(self, tmp_path):
+        """The loop wants the standings sixty times a second; the file changes
+        once every thirty seconds. Re-reading it every frame was most of what
+        this process was doing, on the laptop that is also tracking hands."""
+        book = PlayerBook(tmp_path / "players.csv")
+        book.record("Marta", "marta@example.com", 14.2)
+
+        source = BoardSource(book)
+        assert source.players() is source.players()
+
+    def test_a_new_time_is_picked_up(self, tmp_path):
+        book = PlayerBook(tmp_path / "players.csv")
+        book.record("Marta", "marta@example.com", 14.2)
+        source = BoardSource(book)
+        assert len(source.players()) == 1
+
+        book.record("Javi", "javi@example.com", 14.9)
+        assert len(source.players()) == 2
+
+    def test_no_file_yet_is_an_empty_board(self, tmp_path):
+        """The first minutes of the fair, before anyone has finished a run."""
+        assert BoardSource(PlayerBook(tmp_path / "nothing.csv")).players() == []
+
+    def test_the_quickest_come_first(self, tmp_path):
+        book = PlayerBook(tmp_path / "players.csv")
+        book.record("Slow", "slow@example.com", 20.0)
+        book.record("Quick", "quick@example.com", 14.0)
+        assert [p.name for p in BoardSource(book).players()] == ["Quick", "Slow"]

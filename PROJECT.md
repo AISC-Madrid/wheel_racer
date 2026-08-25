@@ -31,9 +31,10 @@ strangers."
 - **Outdoors.** Uncontrolled lighting and busy moving backgrounds. Hand
   tracking is confirmed robust for this (last year's hand game worked outdoors);
   do not reintroduce face/pose detection, which degrades outdoors.
-- **Small screen, close range.** The game is read up-close by the player, not
-  from across the room. Do not design around a big display or spectator-distance
-  visibility.
+- **Small screen, close range — *the game screen only*.** The game is read
+  up-close by the player, not from across the room. Do not design around a big
+  display or spectator-distance visibility. This does **not** apply to the
+  second screen (see below), which has exactly the opposite job.
 
 ## Locked design decisions
 
@@ -52,6 +53,54 @@ These are settled. Do not re-open them without a strong reason.
   friendly; spinning out publicly is exactly the embarrassment we're avoiding.
 - **Fair lap validation via ordered checkpoints.** Prevents infield-cutting for
   fake times. Already implemented in the core (see below).
+
+## Two screens
+
+The stand runs on two displays, and they have opposite jobs.
+
+- **The laptop**, fullscreen, with the webcam on it. The game. Read from thirty
+  centimetres by the one person holding the bar.
+- **A connected monitor**, facing the stand. A timing tower: whoever is driving
+  right now on the left, the ranking on the right. Read from three to five
+  metres by somebody who has not decided to stop walking yet. Big type, eight
+  rows, first names only — never email addresses, on a screen the public can
+  photograph.
+
+  It is never still. A dim circuit runs behind the board with a car lapping it
+  at the current record pace, and climbing into the top three slides the row up
+  and lights it. Both are deliberately cheap — the circuit is one prebuilt
+  surface replacing the screen fill, and the car is a distance along the
+  centreline rather than a second copy of the game's physics — because this is
+  sharing a laptop with MediaPipe.
+
+They run as **two processes**, but one command starts both:
+
+```
+python run.py
+```
+
+That opens the game and, as a child process, the leaderboard on display 1. Both
+are ordinary windows — **drag each onto the screen it belongs on, then press
+F11** (or Cmd-F) to fill it. They open windowed rather than fullscreen for
+exactly that reason: a fullscreen window is the one thing you cannot drag.
+
+Quitting the game closes the board too. Ctrl-C works, and so does the close
+button. Useful flags:
+
+```
+python run.py --no-leaderboard         # game only
+python run.py --leaderboard-display 0  # board on the laptop instead
+python leaderboard.py                  # bring the board back on its own
+```
+
+The leaderboard being a separate process is what keeps the two independent: it
+can be closed and reopened by hand all afternoon, and if it falls over the
+person at the wheel never finds out.
+
+The game publishes what it is doing to `data/live.json` a few times a second
+and the leaderboard polls it. A running clock is sent as **the time it
+started**, not the time it reads, so the second screen runs its own 60fps timer
+off a couple of writes a second and a late write cannot make it stutter.
 
 ## Tech stack
 
@@ -128,9 +177,8 @@ timer.current_time(now)                # elapsed on the in-progress lap, for the
    facing backwards, snap it to the nearest centerline point facing forward.
    Not yet implemented in the core; needed so a lost player isn't stranded.
    (Nearest point + forward heading is derivable from the track segments.)
-5. **Leaderboard** — persist top-10 lap times to SQLite/JSON; render a panel.
-   Optionally capture a 3-initials name entry after a qualifying lap (keep it
-   fast — booth throughput).
+5. **Leaderboard** — persist lap times to CSV, and render the tower on the
+   second screen. Done: `players.py`, `live.py`, `leaderboard.py`.
 6. **Onboarding / attract state** — a "grab the wheel to start" screen; auto-detect
    both wrists present + level bar to begin a countdown. Onboarding must be
    under ~10s with no manual calibration.

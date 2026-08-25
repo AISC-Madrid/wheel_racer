@@ -28,15 +28,17 @@ mid-afternoon, the person at the wheel never finds out.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pygame
 
 from . import config
 from .display import is_fullscreen_shortcut, open_display, quit_on_signals
 from .effects import Fireworks
+from .backdrop import Backdrop, blend, lap_pace
 from .live import LiveChannel, LiveState
 from .players import Player, PlayerBook
 from .render import format_time
@@ -75,6 +77,41 @@ ROW_GAP = 8.0
 # waiting by it.
 TAKEOVER_SECONDS = 6.0
 
+# How quickly a row slides to a new position, as the time constant of an
+# exponential ease. Slow enough to be followed by eye — the whole point is that
+# somebody *saw* the overtake — and quick enough to be finished before the next
+# player has finished reading their own time.
+SLIDE_TAU = 0.16
+
+# How long a row stays lit after climbing into the top three. This is the only
+# thing on the board that marks the difference between a good lap and a lap
+# that mattered, so it outlasts the slide that caused it.
+PODIUM_FLASH_SECONDS = 2.4
+PODIUM_PLACES = 3
+
+
+@dataclass
+class _RowMotion:
+    """Where a row is being drawn, as opposed to where it belongs.
+
+    `slot` is a fractional position in the tower, eased towards `target` — so
+    two rows swapping are genuinely between places for a moment rather than
+    jumping past each other.
+    """
+
+    slot: float
+    target: int
+    flash: float = 0.0
+
+    def advance(self, dt: float) -> None:
+        # Exponential ease rather than a fixed step per frame, so the slide
+        # takes the same time at 60fps as at 30 — which matters here, because
+        # this screen is the one that gets throttled when the laptop is busy.
+        self.slot += (self.target - self.slot) * (1.0 - math.exp(-dt / SLIDE_TAU))
+        if abs(self.target - self.slot) < 0.001:
+            self.slot = float(self.target)
+        self.flash = max(0.0, self.flash - dt / PODIUM_FLASH_SECONDS)
+
 
 @dataclass(frozen=True)
 class Standing:
@@ -86,6 +123,15 @@ class Standing:
     delta: float | None
     """Gap to the leader, or None for the leader themselves."""
     is_driving: bool
+    key: str = ""
+    """Which row this is, for the animation to follow between positions.
+
+    A short digest of the address rather than the name, because two people
+    called Marta at a student fair is not a hypothetical — and keyed by name,
+    the second one arriving would inherit the first one's row and the tower
+    would animate nonsense. Never drawn and never written anywhere: it exists
+    only to tell one row from another between frames.
+    """
 
 
 def standings(players: list[Player], driver: str = "") -> list[Standing]:
@@ -106,6 +152,8 @@ def standings(players: list[Player], driver: str = "") -> list[Standing]:
             delta=None if index == 0 else player.best_seconds - leader,
             is_driving=bool(driver) and first.casefold() == driver.split()[0].casefold()
             if driver.split() else False,
+            key=hashlib.blake2s(player.email.encode("utf-8"),
+                                digest_size=8).hexdigest(),
         ))
     return rows
 
@@ -120,8 +168,17 @@ class LeaderboardScreen:
         # this works on whatever is on the stand without a second layout.
         self.scale = min(width / DESIGN[0], height / DESIGN[1])
         self.fireworks = Fireworks()
+        self.backdrop = Backdrop((width, height), BACKDROP)
         self._takeover_until = 0.0
         self._celebrated_for: str | None = None
+        self._motion: dict[str, _RowMotion] = {}
+        self._settled = False
+        """Whether the first frame has been drawn.
+
+        Rows animate *into* their positions, which is right for an overtake and
+        wrong for the board simply appearing — without this, opening the screen
+        would play eight simultaneous promotions to an empty stand.
+        """
 
         mono = "menlo,dejavusansmono,consolas,monospace"
         self.font_hero = pygame.font.SysFont(mono, self._pt(150), bold=True)
@@ -144,8 +201,13 @@ class LeaderboardScreen:
         """One frame: the tower, the live half, and any takeover over the top."""
         now = time.time()
         self._notice_new_leader(rows, live, now)
+        self._advance_rows(rows, dt)
 
-        self.screen.fill(BACKDROP)
+        # The circuit is the background — it is a prebuilt surface, so this is
+        # the fill the screen was doing anyway rather than work on top of it.
+        self.backdrop.update(dt, lap_pace(rows[0].seconds if rows else None))
+        self.backdrop.draw(self.screen)
+
         width, height = self.screen.get_size()
         split = round(width * LIVE_COLUMN)
 
@@ -187,6 +249,44 @@ class LeaderboardScreen:
         if leader != self._celebrated_for and live is not None and not live.is_stale():
             self._celebrated_for = leader
             self._takeover_until = now + TAKEOVER_SECONDS
+
+    def _advance_rows(self, rows: list[Standing], dt: float) -> None:
+        """Move every row towards where it now belongs, and light the climbers.
+
+        The tower's *positions* stay put and the drivers move between them,
+        which is both how a real timing tower reads and considerably simpler:
+        the numbers down the left never animate, so nothing has to be drawn
+        over anything else while two rows are passing.
+        """
+        targets = {row.key: index for index, row in enumerate(rows)}
+
+        for key, target in targets.items():
+            motion = self._motion.get(key)
+            if motion is None:
+                # New arrivals rise from below the last slot rather than fading
+                # in on the spot — the board should look like it is being
+                # climbed into, not like rows are appearing out of the air.
+                start = float(ROWS) if self._settled else float(target)
+                self._motion[key] = _RowMotion(slot=start, target=target)
+                if self._settled and target < PODIUM_PLACES:
+                    self._motion[key].flash = 1.0
+                continue
+
+            climbed_onto_the_podium = (target < PODIUM_PLACES
+                                       <= motion.target)
+            motion.target = target
+            if climbed_onto_the_podium:
+                motion.flash = 1.0
+
+        # Anyone pushed off the bottom stops being drawn and stops being
+        # remembered; over an afternoon the alternative is a dictionary with
+        # every player who has ever played in it.
+        for key in [k for k in self._motion if k not in targets]:
+            del self._motion[key]
+
+        for motion in self._motion.values():
+            motion.advance(dt)
+        self._settled = True
 
     # --- the live half -------------------------------------------------------
 
@@ -306,37 +406,81 @@ class LeaderboardScreen:
         available = inner.bottom - footer - top
         row_height = (available - self._px(ROW_GAP) * (ROWS - 1)) / ROWS
 
+        def slot_at(position: float) -> pygame.Rect:
+            return pygame.Rect(
+                inner.left,
+                round(top + position * (row_height + self._px(ROW_GAP))),
+                inner.width, round(row_height))
+
+        # Three passes, bottom to top. Everything that paints a background goes
+        # down before anything that paints a letter, so a row lit up mid-slide
+        # cannot cover the position number it is sliding towards — which is
+        # exactly what it did when each row drew itself in one go.
+        moving = [(row, self._motion.get(row.key)) for row in rows]
+        moving.sort(key=lambda pair: (pair[1].flash if pair[1] else 0.0))
+
         for index in range(ROWS):
-            spot = pygame.Rect(inner.left, round(top + index * (row_height
-                               + self._px(ROW_GAP))), inner.width, round(row_height))
-            self._draw_row(spot, rows[index] if index < len(rows) else None, index)
+            self._draw_slot_rule(slot_at(index))
+        for row, motion in moving:
+            self._draw_row_background(
+                slot_at(motion.slot if motion else row.position - 1), row, motion)
+        for index in range(ROWS):
+            self._draw_slot_number(slot_at(index), index, occupied=index < len(rows))
+        for row, motion in moving:
+            self._draw_row_content(
+                slot_at(motion.slot if motion else row.position - 1), row, motion)
 
         tally = f"{drivers} DRIVER{'' if drivers == 1 else 'S'} TODAY"
         label = self.font_label.render(tally, True, TEXT_DIM)
         self.screen.blit(label, (inner.left, inner.bottom - label.get_height()))
 
-    def _draw_row(self, spot: pygame.Rect, row: Standing | None, index: int) -> None:
-        """One line of the tower. An empty slot is drawn, not skipped.
+    def _draw_slot_rule(self, spot: pygame.Rect) -> None:
+        """The line under a place, drawn whether or not anybody is in it.
 
         Eight slots from the first player of the day onwards, because a board
         that grows a row at a time reads as a stand that is filling up, and a
         board that starts three rows tall reads as one nobody is playing.
         """
-        pad = self._px(22)
-        if row is not None and row.is_driving:
-            pygame.draw.rect(self.screen, BACKDROP_LIT, spot,
-                             border_radius=self._px(10))
         pygame.draw.line(self.screen, RULE, (spot.left, spot.bottom),
                          (spot.right, spot.bottom), max(1, self._px(1)))
 
-        colour = PODIUM[index] if index < len(PODIUM) else TEXT
-        position = self.font_row.render(str(index + 1), True,
-                                        colour if row else RULE)
-        self.screen.blit(position, (spot.left + pad,
-                                    spot.centery - position.get_height() // 2))
+    def _draw_slot_number(self, spot: pygame.Rect, index: int,
+                          occupied: bool) -> None:
+        """The position, which belongs to the slot and never moves.
 
-        if row is None:
-            return
+        This is what a real timing tower does, and it is also what makes the
+        animation cheap: only names and times slide, so nothing is ever drawn
+        across a number while two rows are passing each other.
+        """
+        if not occupied:
+            colour = RULE
+        elif index < len(PODIUM):
+            colour = PODIUM[index]
+        else:
+            colour = TEXT
+        number = self.font_row.render(str(index + 1), True, colour)
+        self.screen.blit(number, (spot.left + self._px(22),
+                                  spot.centery - number.get_height() // 2))
+
+    def _draw_row_background(self, spot: pygame.Rect, row: Standing,
+                             motion: _RowMotion | None) -> None:
+        flash = motion.flash if motion else 0.0
+        if flash > 0.0:
+            # Lit from the left edge, fading across — a full panel of gold at
+            # this size is a slab, and this reads as the row being picked out.
+            self._draw_flash(spot, flash)
+        elif row.is_driving:
+            pygame.draw.rect(self.screen, BACKDROP_LIT, spot,
+                             border_radius=self._px(10))
+
+    def _draw_row_content(self, spot: pygame.Rect, row: Standing,
+                          motion: _RowMotion | None) -> None:
+        """One driver's name and time, at whatever position they are between."""
+        pad = self._px(22)
+        # Coloured by where they are *now*, so the gold arrives as the row
+        # arrives rather than a moment before or after it.
+        place = int(round(motion.slot)) if motion else row.position - 1
+        colour = PODIUM[place] if place < len(PODIUM) else TEXT
 
         name = self._fit(row.name, self.font_name, spot.width * 0.52)
         self.screen.blit(name, (spot.left + pad + self._px(90),
@@ -350,6 +494,28 @@ class LeaderboardScreen:
             value = self.font_row.render(f"+{row.delta:.2f}", True, TEXT_DIM)
         self.screen.blit(value, (spot.right - pad - value.get_width(),
                                  spot.centery - value.get_height() // 2))
+
+    def _draw_flash(self, spot: pygame.Rect, flash: float) -> None:
+        """The glow on a row that has just climbed into the top three.
+
+        Drawn as a handful of opaque bars shading back to the background rather
+        than as an alpha surface, for the same reason the backdrop's trail is:
+        this screen is sharing a laptop with the hand tracking, and a
+        full-width translucent blit every frame is a cost worth not paying for
+        a two-second highlight.
+        """
+        # Enough bands that the steps stop being visible as steps. Thirty-two
+        # opaque rectangles is still less work than one of the row's two text
+        # renders, so there is no reason to be stingy and see the banding.
+        steps = 32
+        for index in range(steps):
+            fade = flash * (1.0 - index / steps) ** 2
+            band = pygame.Rect(spot.left + spot.width * index // steps,
+                               spot.top, spot.width // steps + 2, spot.height)
+            pygame.draw.rect(self.screen, blend(BACKDROP_LIT, PODIUM[0], fade),
+                             band)
+        pygame.draw.rect(self.screen, blend(BACKDROP_LIT, PODIUM[0], flash),
+                         pygame.Rect(spot.left, spot.top, self._px(6), spot.height))
 
     def _fit(self, text: str, font: pygame.font.Font,
              limit: float) -> pygame.Surface:
@@ -424,6 +590,39 @@ class LeaderboardScreen:
                     math.ceil(square) + 1, math.ceil(half) + 1))
 
 
+class BoardSource:
+    """The player book, read only when it has actually changed.
+
+    The loop needs the standings every frame, and asking `PlayerBook` for them
+    means opening and parsing the CSV — sixty times a second, for a file that
+    changes once every thirty seconds when somebody finishes a run. Left alone
+    that was most of what this process was doing, and it was doing it on the
+    same laptop as the hand tracking.
+
+    Cached on the file's timestamp, the way the live channel is. A file that
+    has not been written is not re-read; one that has, is.
+    """
+
+    def __init__(self, book: PlayerBook) -> None:
+        self.book = book
+        self._stamp: float | None = None
+        self._players: list[Player] = []
+
+    def players(self) -> list[Player]:
+        try:
+            stamp = self.book.path.stat().st_mtime
+        except OSError:
+            # No file yet — the first minutes of the fair, before anyone has
+            # finished a run. An empty board is a state this screen draws.
+            self._stamp, self._players = None, []
+            return self._players
+
+        if stamp != self._stamp:
+            self._stamp = stamp
+            self._players = sorted(self.book.all(), key=lambda p: p.best_seconds)
+        return self._players
+
+
 def run(display: int = 1, size: tuple[int, int] | None = None,
         fullscreen: bool = False, book: PlayerBook | None = None,
         channel: LiveChannel | None = None) -> None:
@@ -441,7 +640,7 @@ def run(display: int = 1, size: tuple[int, int] | None = None,
     windowed_size = size or (1280, 720)
     screen = open_display(None if fullscreen else windowed_size, fullscreen, display)
     board = LeaderboardScreen(screen)
-    players = book if book is not None else PlayerBook()
+    players = BoardSource(book if book is not None else PlayerBook())
     live_channel = channel if channel is not None else LiveChannel()
     clock = pygame.time.Clock()
 
@@ -467,9 +666,8 @@ def run(display: int = 1, size: tuple[int, int] | None = None,
                 board = LeaderboardScreen(screen)
 
         state = live_channel.read()
-        everyone = players.all()
-        rows = standings(sorted(everyone, key=lambda p: p.best_seconds)[:ROWS],
-                         driver=state.name if state else "")
+        everyone = players.players()
+        rows = standings(everyone[:ROWS], driver=state.name if state else "")
         board.draw(rows, state, len(everyone), dt)
         pygame.display.flip()
 
