@@ -51,6 +51,17 @@ TURN_SPEED_RESPONSE = 0.5
 # --- Track ------------------------------------------------------------------
 TRACK_WIDTH = 62.0
 
+# Which way round the circuit is driven, as seen on screen. Clockwise sends the
+# car up the screen off the grid, which is the readable way round: the first
+# corner opens away from the player instead of arriving underneath them before
+# they have worked out which way the wheel moves the car.
+#
+# Flipping this reverses the direction without moving the start line and without
+# changing the shape — the same corners arrive in the opposite order and turn
+# the other way. Worth having at a booth: once the queue has watched ten people
+# learn the racing line, turning it round gives everyone a fresh track for free.
+RUN_CLOCKWISE = True
+
 # --- The run ----------------------------------------------------------------
 LAPS_PER_RUN = 2
 TARGET_RUN_SECONDS = 30.0

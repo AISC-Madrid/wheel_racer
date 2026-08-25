@@ -1,12 +1,22 @@
 """The game loop and the states a booth visitor passes through.
 
-Four states, and the shape of them is set by booth throughput rather than by
-anything about racing: get someone driving in a couple of seconds, take about
-thirty seconds off them, show them a number, and be ready for the next person
-without anyone having to touch the machine.
+Five states, and the shape of them is set by booth throughput rather than by
+anything about racing: sign someone in, get them driving in a couple of seconds,
+take about thirty seconds off them, show them a number, and be ready for the
+next person without anyone having to touch the machine.
 
-Registration and the leaderboard slot in later, between ATTRACT and COUNTDOWN
-and after RESULT respectively; the states are laid out to leave room for them.
+  LOGIN -> ATTRACT -> COUNTDOWN -> RACING -> RESULT -> ATTRACT or LOGIN
+
+Signing in gates everything: there is no path into a run that skips the form,
+because the names and addresses are what the booth is there to collect. RESULT
+puts the same form back up with the player's time above it, so handing over is
+the same few keystrokes as arriving — and ENTER on an untouched form means the
+same person going again.
+
+RESULT does not expire. A time left on screen is the booth advertising itself
+to the queue, and a screen that resets on a timer either wipes a half-typed
+address or clears somebody's result before they have shown their friends. It
+stays until the next person does something about it.
 """
 
 from __future__ import annotations
@@ -20,8 +30,10 @@ from .car import Car
 from .effects import DustCloud, TyreTrail
 from .inputs import InputSource, PreviewFrame
 from .laptimer import LapTimer
+from .login import LoginForm
+from .players import PlayerBook, normalise_email
 from .recovery import RecoveryMonitor
-from .render import Renderer
+from .render import Renderer, format_time
 from .steering import SteeringFilter
 from .track import TrackPoint
 from .world import World, build_world
@@ -34,11 +46,11 @@ from .world import World, build_world
 MAX_FRAME_SECONDS = 0.05
 
 COUNTDOWN_SECONDS = 3.0
-RESULT_SECONDS = 8.0
 RESPAWN_FLASH_SECONDS = 1.2
 
 
 class State(Enum):
+    LOGIN = auto()
     ATTRACT = auto()
     COUNTDOWN = auto()
     RACING = auto()
@@ -54,6 +66,7 @@ class Game:
         screen: pygame.Surface,
         world: World,
         auto_start: bool = False,
+        book: PlayerBook | None = None,
     ) -> None:
         self.source = source
         self.world = world
@@ -81,7 +94,16 @@ class Game:
         self.trail = TyreTrail()
         self.dust = DustCloud()
 
-        self.state = State.ATTRACT
+        # Signing in is what the booth is actually collecting, so it gates
+        # play: there is no way into a run that does not go through the form.
+        self.book = book if book is not None else PlayerBook()
+        self.form = LoginForm()
+        self.player_name = ""
+        self.player_email = ""
+        self.personal_best: float | None = None
+        self.beat_their_best = False
+
+        self.state = State.LOGIN
         self.now = 0.0
         self.splits: list[float] = []
         self.best_run: float | None = None
@@ -91,6 +113,10 @@ class Game:
         self._state_deadline = 0.0
         self._respawn_flash_until = 0.0
         self._level_for = 0.0
+
+    @property
+    def signed_in(self) -> bool:
+        return bool(self.player_email)
 
     @property
     def hands_present(self) -> bool:
@@ -122,17 +148,50 @@ class Game:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return False
-            if event.type != pygame.KEYDOWN:
-                continue
-            if event.key == pygame.K_ESCAPE:
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 return False
-            if event.key == pygame.K_SPACE:
-                self._on_space()
+
+            if self.state in (State.LOGIN, State.RESULT):
+                # Every other key belongs to the form while it is up, including
+                # space — which is a character in somebody's name long before it
+                # is a button.
+                self._handle_form(event)
+            elif (event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE
+                    and self.state is State.ATTRACT):
+                self._begin_countdown()
         return True
 
-    def _on_space(self) -> None:
-        if self.state in (State.ATTRACT, State.RESULT):
+    def _handle_form(self, event: pygame.event.Event) -> None:
+        """Typing, and the one shortcut that shares a key with it.
+
+        On the result screen ENTER means two different things, told apart by
+        whether anything has been typed: an untouched form means the same
+        player going again, and a filled one means they are handing over. That
+        keeps the whole screen to one key rather than teaching a queue two.
+        """
+        if (self.state is State.RESULT and self.form.is_empty
+                and event.type == pygame.KEYDOWN
+                and event.key in (pygame.K_RETURN, pygame.K_KP_ENTER)):
             self._begin_countdown()
+            return
+
+        self.form.handle(event)
+        if self.form.submitted:
+            self._sign_in()
+
+    def _sign_in(self) -> None:
+        """Take the form's word for it and let them at the wheel.
+
+        A returning address brings its best time back with it, so the HUD shows
+        what they have to beat rather than starting them from nothing.
+        """
+        self.player_name = self.form.name
+        self.player_email = normalise_email(self.form.email)
+        self.personal_best = self.book.best_for(self.player_email)
+        self.form.clear()
+        self.splits = []
+        self.state = State.ATTRACT
+        self._reset_car()
 
     def _read_steering(self, dt: float) -> float:
         """One steering value per frame, whether or not a sample arrived."""
@@ -145,14 +204,14 @@ class Game:
         return self.steering.update(sample.left, sample.right, dt)
 
     def _advance(self, steering: float, dt: float) -> None:
+        if self.state is State.LOGIN:
+            return
         if self.state is State.ATTRACT:
             self._advance_attract(steering, dt)
         elif self.state is State.COUNTDOWN and self.now >= self._state_deadline:
             self._begin_race()
         elif self.state is State.RACING:
             self._advance_race(steering, dt)
-        elif self.state is State.RESULT and self.now >= self._state_deadline:
-            self.state = State.ATTRACT
 
     def _advance_attract(self, steering: float, dt: float) -> None:
         """Start a run when someone picks the bar up and holds it level.
@@ -202,11 +261,21 @@ class Game:
             self.timer.start(self.now)
             return
 
-        total = sum(self.splits)
-        if self.best_run is None or total < self.best_run:
-            self.best_run = total
+        best_lap = min(self.splits)
+        if self.best_run is None or best_lap < self.best_run:
+            self.best_run = best_lap
+
+        # Asked before the save, because "did they beat it" is exactly "did
+        # the stored value move". Comparing the raw time against the saved one
+        # instead would call a tie a personal best, since the file keeps
+        # hundredths and the clock does not.
+        previous = self.book.best_for(self.player_email)
+        stored = self.book.record(self.player_name, self.player_email, best_lap)
+        self.beat_their_best = previous is None or stored.best_seconds < previous
+        self.personal_best = stored.best_seconds
+
+        self.form.clear()
         self.state = State.RESULT
-        self._state_deadline = self.now + RESULT_SECONDS
 
     def _respawn(self) -> None:
         """Put a lost car back on the racing line, facing the right way.
@@ -253,12 +322,18 @@ class Game:
     # --- drawing -------------------------------------------------------------
 
     @property
-    def run_time(self) -> float | None:
-        """Elapsed time across the whole attempt, laps so far plus this one."""
+    def lap_time(self) -> float | None:
+        """What the big clock shows.
+
+        The lap in progress while driving, and the best lap of the run once it
+        is over — because the best lap is the score. A running total would be
+        the wrong number in the largest text on screen, and next to a personal
+        best measured in laps it would invite a comparison that means nothing.
+        """
         running = self.timer.current_time(self.now)
-        if running is None and not self.splits:
-            return None
-        return sum(self.splits) + (running or 0.0)
+        if running is not None:
+            return running
+        return min(self.splits) if self.splits else None
 
     def _draw(self, steering: float) -> None:
         self.renderer.draw_world(self.car, steering, self.trail, self.dust)
@@ -272,15 +347,27 @@ class Game:
             )
             return
 
+        if self.state is State.LOGIN:
+            self.renderer.draw_login(
+                self.form,
+                headline="HAND WHEEL RACER",
+                subhead=f"sign in to play  ·  {config.LAPS_PER_RUN} laps",
+                hint="TAB to move on  ·  ENTER to take the wheel",
+            )
+            return
+
         if self.state is State.ATTRACT:
-            self.renderer.draw_centre_message("HAND WHEEL RACER", self._attract_prompt())
+            self.renderer.draw_centre_message(
+                f"READY, {self.player_name.upper()}" if self.player_name else "READY",
+                self._attract_prompt(),
+            )
             return
 
         self.renderer.draw_hud(
-            run_time=self.run_time,
+            run_time=self.lap_time,
             lap=min(len(self.splits) + 1, config.LAPS_PER_RUN),
             laps_total=config.LAPS_PER_RUN,
-            best=self.best_run,
+            best=self.personal_best,
             steering=steering,
             on_track=self.located.on_track or self.state is not State.RACING,
         )
@@ -288,11 +375,28 @@ class Game:
         if self.state is State.COUNTDOWN:
             self.renderer.draw_centre_message(self._countdown_text(), huge=True)
         elif self.state is State.RESULT:
-            self.renderer.draw_result(
-                self.splits, self.best_run, is_best=sum(self.splits) == self.best_run
+            self.renderer.draw_login(
+                self.form,
+                headline=format_time(min(self.splits)),
+                subhead=self._splits_line(),
+                hint=self._result_hint(),
+                celebrate=self.beat_their_best,
+                replay=self.form.is_empty,
             )
         elif self.now < self._respawn_flash_until:
             self.renderer.draw_centre_message("BACK ON TRACK")
+
+    def _splits_line(self) -> str:
+        """Every lap, so the headline figure can be seen where it came from."""
+        laps = "  ·  ".join(f"lap {i} {format_time(s)}"
+                            for i, s in enumerate(self.splits, start=1))
+        return f"NEW BEST LAP  ·  {laps}" if self.beat_their_best else f"BEST LAP  ·  {laps}"
+
+    def _result_hint(self) -> str:
+        """What ENTER will do, which depends on whether anything is typed."""
+        if not self.form.is_empty:
+            return "ENTER to sign in and take over"
+        return "ENTER to replay  ·  or type to sign in"
 
     def _attract_prompt(self) -> str:
         """One line, telling the player the next thing to do and nothing else."""
@@ -321,6 +425,10 @@ def start(
     """Open a window and play until the player quits."""
     pygame.init()
     pygame.display.set_caption("Hand-Wheel Racer — AISC Madrid")
+
+    # Held keys repeat, so backspacing a mistyped address is one press rather
+    # than forty.
+    pygame.key.set_repeat(400, 40)
 
     flags = pygame.FULLSCREEN if fullscreen else 0
     screen = pygame.display.set_mode((width, height), flags)

@@ -18,7 +18,8 @@ import pygame
 from .car import Car
 from .effects import DustCloud, TyreTrail
 from .inputs import PreviewFrame
-from .trackart import CHECKPOINT, build_track_layer
+from .login import LoginForm
+from .trackart import CHEQUER_DARK, CHEQUER_LIGHT, CHECKPOINT, build_track_layer
 from .world import World
 
 TEXT = (240, 242, 246)
@@ -26,6 +27,17 @@ TEXT_DIM = (168, 176, 188)
 PANEL = (18, 20, 26, 190)
 WARNING = (232, 116, 74)
 GOOD = (126, 214, 148)
+
+FIELD_BOX = (30, 33, 41)
+FIELD_BOX_FOCUSED = (44, 50, 62)
+FIELD_EDGE = (72, 78, 92)
+FIELD_EDGE_FOCUSED = CHECKPOINT
+
+# The sign-in panel, in design pixels.
+LOGIN_WIDTH = 560.0
+FLAG_HEIGHT = 18.0
+FLAG_SQUARES = 16
+FIELD_HEIGHT = 44.0
 
 CAR_BODY = (228, 84, 62)
 CAR_BODY_DARK = (176, 58, 42)
@@ -187,7 +199,7 @@ class Renderer:
         self.screen.blit(clock, (2 * margin, margin + round(8 * self.scale)))
         self.screen.blit(lap_text, (2 * margin, margin + clock.get_height() + round(6 * self.scale)))
 
-        best_label = self.font_label.render("BEST", True, TEXT_DIM)
+        best_label = self.font_label.render("BEST LAP", True, TEXT_DIM)
         best_value = self.font_body.render(format_time(best), True, GOOD if best else TEXT_DIM)
         width = max(best_label.get_width(), best_value.get_width()) + 2 * margin
         right = self.screen.get_width() - margin - width
@@ -356,31 +368,161 @@ class Renderer:
             self.screen.blit(line, (rect.centerx - line.get_width() // 2, y))
             y += line.get_height() + gap
 
-    def draw_result(self, splits: list[float], best: float | None, is_best: bool) -> None:
-        total = sum(splits)
-        pad = round(30 * self.scale)
+    def draw_login(self, form: LoginForm, headline: str, subhead: str = "",
+                   hint: str = "", celebrate: bool = False, replay: bool = False) -> None:
+        """The sign-in panel, over whatever the game is showing behind it.
 
-        rows = [self.font_huge.render(format_time(total), True, GOOD if is_best else TEXT)]
-        rows.append(self.font_label.render(
-            "NEW BEST" if is_best else "YOUR TIME", True, GOOD if is_best else TEXT_DIM))
-        for index, split in enumerate(splits, start=1):
-            rows.append(self.font_body.render(
-                f"lap {index}   {format_time(split)}", True, TEXT_DIM))
-        if best is not None and not is_best:
-            rows.append(self.font_body.render(
-                f"best    {format_time(best)}", True, TEXT_DIM))
+        The same panel does duty before the first run and after every one: the
+        only difference is the headline above it, which is the game's name to
+        begin with and the player's time afterwards. Keeping it one panel means
+        handing the machine to the next person is the same few keystrokes
+        wherever you are in the evening.
+        """
+        pad = round(26 * self.scale)
+        flag = round(FLAG_HEIGHT * self.scale)
+        gap = round(12 * self.scale)
 
-        gap = round(10 * self.scale)
-        width = max(row.get_width() for row in rows) + 2 * pad
-        height = sum(row.get_height() for row in rows) + gap * (len(rows) - 1) + 2 * pad
-        rect = pygame.Rect(0, 0, width, height)
-        rect.center = self.screen.get_rect().center
-        self._panel(rect)
+        title = (self.font_huge if celebrate else self.font_clock).render(
+            headline, True, GOOD if celebrate else TEXT)
+        under = self.font_label.render(subhead, True, TEXT_DIM) if subhead else None
+        footer = self.font_label.render(hint, True, TEXT_DIM) if hint else None
+        message = self.font_body.render(form.error, True, WARNING) if form.error else None
 
-        y = rect.top + pad
-        for row in rows:
-            self.screen.blit(row, (rect.centerx - row.get_width() // 2, y))
-            y += row.get_height() + gap
+        width = self._login_width(form, headline, subhead, hint, celebrate, replay)
+        icon = self._replay_icon_size() if replay else 0
+        icon_gap = round(9 * self.scale) if replay else 0
+        box_height = round(FIELD_HEIGHT * self.scale)
+        label_height = self.font_label.get_height()
+        rows = len(form.fields) * (label_height + box_height + gap)
+
+        height = (2 * flag + 2 * pad + title.get_height() + gap + rows
+                  + (under.get_height() + gap if under else 0)
+                  + (message.get_height() + gap if message else 0)
+                  + (footer.get_height() if footer else 0))
+
+        panel = pygame.Rect(0, 0, width, height)
+        panel.center = self.screen.get_rect().center
+        self._panel(panel)
+        self._chequered_strip(pygame.Rect(panel.left, panel.top, width, flag))
+        self._chequered_strip(pygame.Rect(panel.left, panel.bottom - flag, width, flag))
+
+        y = panel.top + flag + pad
+        self.screen.blit(title, (panel.centerx - title.get_width() // 2, y))
+        y += title.get_height() + gap
+        if under:
+            self.screen.blit(under, (panel.centerx - under.get_width() // 2, y))
+            y += under.get_height() + gap
+
+        for index, box in enumerate(form.fields):
+            focused = index == form.focused
+            label = self.font_label.render(box.label, True,
+                                           FIELD_EDGE_FOCUSED if focused else TEXT_DIM)
+            self.screen.blit(label, (panel.left + pad, y))
+            y += label_height
+
+            rect = pygame.Rect(panel.left + pad, y, width - 2 * pad, box_height)
+            pygame.draw.rect(self.screen, FIELD_BOX_FOCUSED if focused else FIELD_BOX,
+                             rect, border_radius=round(6 * self.scale))
+            pygame.draw.rect(self.screen, FIELD_EDGE_FOCUSED if focused else FIELD_EDGE,
+                             rect, width=max(1, round(2 * self.scale)),
+                             border_radius=round(6 * self.scale))
+
+            value = self.font_body.render(box.value, True, TEXT)
+            inset = round(12 * self.scale)
+            self.screen.blit(value, (rect.left + inset,
+                                     rect.centery - value.get_height() // 2))
+            if focused and self._caret_is_showing():
+                caret = rect.left + inset + value.get_width() + round(2 * self.scale)
+                pygame.draw.line(self.screen, TEXT,
+                                 (caret, rect.top + inset // 2),
+                                 (caret, rect.bottom - inset // 2),
+                                 max(1, round(2 * self.scale)))
+            y += box_height + gap
+
+        if message:
+            self.screen.blit(message, (panel.centerx - message.get_width() // 2, y))
+            y += message.get_height() + gap
+        if footer:
+            block = footer.get_width() + icon + icon_gap
+            left = panel.centerx - block // 2
+            if replay:
+                self._draw_replay_icon(
+                    (left + icon // 2, y + footer.get_height() // 2), icon, TEXT)
+            self.screen.blit(footer, (left + icon + icon_gap, y))
+
+    def _replay_icon_size(self) -> int:
+        """Half again the height of the line it sits beside, so it reads as a
+        symbol rather than as a full stop."""
+        return round(self.font_label.get_height() * 1.5)
+
+    def _draw_replay_icon(self, centre: tuple[int, int], size: int,
+                          colour: tuple[int, int, int]) -> None:
+        """A circular arrow, drawn rather than typed.
+
+        The obvious character for this is not in every monospace font, and a
+        missing glyph would show as an empty box on the one screen every player
+        sees. Fifteen lines of arc and triangle cannot go missing.
+        """
+        thickness = max(2, round(size * 0.15))
+        # The arc is inset so the head, which is wider than the stroke, still
+        # fits inside the space the icon was measured to take.
+        radius = size / 2.0 - thickness
+        box = pygame.Rect(0, 0, round(radius * 2), round(radius * 2))
+        box.center = centre
+
+        # A gap at the top right, where the head goes. pygame measures arc
+        # angles anticlockwise from three o'clock.
+        opening = 1.0
+        pygame.draw.arc(self.screen, colour, box, opening, 2.0 * math.pi, thickness)
+
+        # Head at the open end, pointing the way the arrow travels: clockwise,
+        # which is the direction of decreasing angle.
+        tip_x = centre[0] + radius * math.cos(opening)
+        tip_y = centre[1] - radius * math.sin(opening)
+        along = (math.sin(opening), math.cos(opening))
+        across = (-along[1], along[0])
+        reach = size * 0.30
+        spread = size * 0.17
+        pygame.draw.polygon(self.screen, colour, [
+            (tip_x + along[0] * reach, tip_y + along[1] * reach),
+            (tip_x + across[0] * spread, tip_y + across[1] * spread),
+            (tip_x - across[0] * spread, tip_y - across[1] * spread),
+        ])
+
+    def _login_width(self, form: LoginForm, headline: str, subhead: str = "",
+                     hint: str = "", celebrate: bool = False,
+                     replay: bool = False) -> int:
+        """Wide enough for its own contents, never narrower than the design width.
+
+        A long name or a returning player's address should push the panel out
+        rather than run off the end of it.
+        """
+        pad = round(26 * self.scale)
+        lines = [
+            (self.font_huge if celebrate else self.font_clock).size(headline)[0],
+            self.font_label.size(subhead)[0] if subhead else 0,
+            (self.font_label.size(hint)[0]
+             + (self._replay_icon_size() + round(9 * self.scale) if replay else 0))
+            if hint else 0,
+            self.font_body.size(form.error)[0] if form.error else 0,
+        ]
+        return max(round(LOGIN_WIDTH * self.scale), max(lines) + 2 * pad)
+
+    @staticmethod
+    def _caret_is_showing() -> bool:
+        """Blinks, so an empty focused field still looks like it wants typing."""
+        return pygame.time.get_ticks() % 1000 < 600
+
+    def _chequered_strip(self, rect: pygame.Rect) -> None:
+        """A racing flag along the edge of the panel."""
+        square = rect.width / FLAG_SQUARES
+        half = rect.height / 2
+        for column in range(FLAG_SQUARES):
+            for row in range(2):
+                colour = CHEQUER_LIGHT if (column + row) % 2 else CHEQUER_DARK
+                pygame.draw.rect(self.screen, colour, pygame.Rect(
+                    round(rect.left + column * square), round(rect.top + row * half),
+                    round(square) + 1, round(half) + 1))
 
     def _panel(self, rect: pygame.Rect) -> None:
         """A translucent slab, so text stays readable over grass or tarmac."""

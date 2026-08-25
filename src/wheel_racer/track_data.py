@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import config
 from .track import Track
 
 DESIGN_WIDTH = 1280
@@ -28,32 +29,58 @@ DESIGN_HEIGHT = 720
 # progress and grass edges are smooth, coarse enough to keep the polyline short.
 SAMPLE_SPACING = 8.0
 
-# The circuit, clockwise from the start line on the left. An outer ring with an
-# indentation pushed into the top and bottom straights: the indentations add the
-# lap length that a plain oval cannot reach inside one screen, and they do it
-# with sweeping direction changes rather than tight corners.
+# The circuit, clockwise on screen from the start line on the left: up the left
+# side, right along the top, down the right side, back along the bottom. Driven
+# this way the car leaves the grid heading *up* the screen, and the first corner
+# opens away from it — going down first put the first turn under the car before
+# anyone had worked out which way the wheel moved it.
+#
+# An outer ring with an indentation pushed into the top and bottom straights:
+# the indentations add the lap length that a plain oval cannot reach inside one
+# screen, and they do it with sweeping direction changes rather than tight
+# corners.
 CONTROL_POINTS: list[tuple[float, float]] = [
-    (150.0, 470.0),   # start line, heading down-left into the first sweeper
-    (225.0, 585.0),
-    (390.0, 612.0),
-    (600.0, 515.0),   # indentation in the bottom straight
-    (810.0, 608.0),
-    (1000.0, 596.0),
-    (1160.0, 460.0),
-    (1145.0, 255.0),
-    (1000.0, 125.0),
-    (810.0, 112.0),
-    (615.0, 205.0),   # indentation in the top straight
-    (420.0, 115.0),
-    (240.0, 150.0),
+    (150.0, 470.0),   # start line, heading up the left side
     (120.0, 295.0),
+    (240.0, 150.0),
+    (420.0, 115.0),
+    (615.0, 205.0),   # indentation in the top straight
+    (810.0, 112.0),
+    (1000.0, 125.0),
+    (1145.0, 255.0),
+    (1160.0, 460.0),
+    (1000.0, 596.0),
+    (810.0, 608.0),
+    (600.0, 515.0),   # indentation in the bottom straight
+    (390.0, 612.0),
+    (225.0, 585.0),
 ]
 
 
 def design_centerline() -> np.ndarray:
-    """The circuit as a uniformly spaced closed polyline, in design pixels."""
+    """The circuit as a uniformly spaced closed polyline, in design pixels.
+
+    Authored clockwise on screen; `config.RUN_CLOCKWISE` decides whether it is
+    handed over that way or the other way round.
+    """
     smooth = _catmull_rom_loop(np.array(CONTROL_POINTS, dtype=float))
-    return _resample_uniformly(smooth, SAMPLE_SPACING)
+    points = _resample_uniformly(smooth, SAMPLE_SPACING)
+    return points if config.RUN_CLOCKWISE else _driven_backwards(points)
+
+
+def _driven_backwards(points: np.ndarray) -> np.ndarray:
+    """The same loop, ordered the other way, starting from the same point.
+
+    Direction of travel is nothing more than the order of these points: every
+    heading is the vector to the next one, and lap progress is distance along
+    them. So reversing the order is the whole change — corners, kerbs, gates and
+    the racing line all follow without knowing anything about it.
+
+    The first point is deliberately left where it is rather than reversing the
+    array outright, which would put the start line at the far end of the lap and
+    leave the chequered line, the grid and the club logo somewhere else entirely.
+    """
+    return np.vstack([points[:1], points[:0:-1]])
 
 
 def build_track(width: float, scale: float = 1.0, offset: tuple[float, float] = (0.0, 0.0)) -> Track:
