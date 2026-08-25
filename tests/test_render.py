@@ -181,6 +181,92 @@ class TestCameraPreview:
         assert 0 <= top and top + 135 <= screen.get_height()
 
 
+class TestCameraPreviewOnABiggerDisplay:
+    """Placement has to survive going fullscreen.
+
+    The bug this exists to stop: the gap between the screen edge and the
+    circuit grows with the window while the HUD's margin does not, so past
+    about 1.3x the corner became the clear space furthest from the centre and
+    the preview went and sat underneath the lap clock.
+    """
+
+    # A booth laptop, a MacBook's own panel, and two common external monitors.
+    SIZES = [(1280, 720), (1710, 1068), (1920, 1080), (2560, 1440)]
+    SOURCE = (240, 180)
+    """What the camera hands over, in design pixels."""
+
+    @staticmethod
+    def renderer_for(size: tuple[int, int]) -> Renderer:
+        """A renderer on an off-screen surface, so each size is independent."""
+        return Renderer(pygame.Surface(size), build_world(*size))
+
+    def placement(self, size: tuple[int, int]) -> pygame.Rect:
+        renderer = self.renderer_for(size)
+        scaled = (round(self.SOURCE[0] * renderer.scale),
+                  round(self.SOURCE[1] * renderer.scale))
+        return pygame.Rect(renderer._preview_anchor(scaled), scaled)
+
+    @pytest.mark.parametrize("size", SIZES)
+    def test_the_preview_never_lands_on_the_hud(self, size):
+        renderer = self.renderer_for(size)
+        assert self.placement(size).collidelist(renderer._hud_zones()) == -1
+
+    @pytest.mark.parametrize("size", SIZES)
+    def test_the_hud_zones_cover_where_the_hud_is_drawn(self, size):
+        """The reservation is measured from font metrics rather than from the
+        panels themselves, so it has to be checked against the real thing."""
+        renderer = self.renderer_for(size)
+        renderer.screen.fill((0, 0, 0))
+        renderer.draw_hud(run_time=61.5, lap=1, laps_total=2, best=59.9,
+                          steering=0.0, on_track=True)
+
+        zones = renderer._hud_zones()
+        painted = [(x, y)
+                   for x in range(0, size[0], 7) for y in range(0, size[1], 7)
+                   if renderer.screen.get_at((x, y))[:3] != (0, 0, 0)]
+        assert painted, "the hud drew nothing"
+        assert all(pygame.Rect(x, y, 1, 1).collidelist(zones) != -1
+                   for x, y in painted)
+
+    def test_it_lands_in_the_same_place_whatever_the_resolution(self):
+        """The whole picture — circuit, HUD and now the preview — scales
+        together, so the search is looking at the same shape every time and
+        settles in the same spot. Only same-shaped screens are compared: a
+        different aspect ratio letterboxes the circuit and genuinely moves the
+        gaps around it."""
+        def fraction(size):
+            spot = self.placement(size)
+            return (spot.centerx / size[0], spot.centery / size[1])
+
+        reference = fraction((1280, 720))
+        for size in [(1920, 1080), (2560, 1440)]:
+            assert fraction(size) == pytest.approx(reference, abs=0.02)
+
+    def test_the_preview_grows_with_the_display(self):
+        """Blitted at its own fixed width it shrank against everything else,
+        until on a booth monitor the thing a player checks when the car will
+        not turn was a stamp in the corner."""
+        renderer = self.renderer_for((2560, 1440))
+        renderer.screen.fill((0, 0, 0))
+        rgb = np.full((self.SOURCE[1], self.SOURCE[0], 3), 90, dtype=np.uint8)
+        renderer.draw_preview(PreviewFrame(rgb=rgb, left=None, right=None))
+
+        spot = self.placement((2560, 1440))
+        # A point beyond where an unscaled preview would have ended, but well
+        # inside a scaled one.
+        beyond = (spot.left + self.SOURCE[0] + 20, spot.top + self.SOURCE[1] + 20)
+        assert spot.collidepoint(beyond)
+        assert renderer.screen.get_at(beyond)[:3] != (0, 0, 0)
+
+    @pytest.mark.parametrize("size", SIZES)
+    def test_the_preview_still_stays_off_the_track(self, size):
+        renderer = self.renderer_for(size)
+        spot = self.placement(size)
+        for x in np.linspace(spot.left, spot.right, 11):
+            for y in np.linspace(spot.top, spot.bottom, 9):
+                assert not renderer.world.track.locate(float(x), float(y)).on_track
+
+
 class TestFormatTime:
     def test_shows_hundredths(self):
         assert format_time(12.345) == "12.35"

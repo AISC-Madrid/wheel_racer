@@ -222,3 +222,5 @@ data/
 
 # macOS Finder metadata — local clutter, never useful in a repo.
 .DS_Store
+
+.vscode/

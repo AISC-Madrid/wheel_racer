@@ -242,14 +242,16 @@ class TestStartingByHoldingTheWheel:
         assert game.state is State.ATTRACT
 
 
-class TestDrivingARun:
-    @pytest.fixture
-    def finished(self, game) -> Game:
-        press_space()
-        run_for(game, COUNTDOWN_SECONDS + 0.2)
-        run_for(game, 120.0, until=State.RESULT)
-        return game
+@pytest.fixture
+def finished(game) -> Game:
+    """A whole run driven, sitting on the result screen."""
+    press_space()
+    run_for(game, COUNTDOWN_SECONDS + 0.2)
+    run_for(game, 120.0, until=State.RESULT)
+    return game
 
+
+class TestDrivingARun:
     def test_the_run_reaches_the_result_screen(self, finished):
         assert finished.state is State.RESULT
 
@@ -494,3 +496,44 @@ class TestChangingTheWindow:
         assert not _is_fullscreen_shortcut(plain)
         assert _is_fullscreen_shortcut(held)
         assert _is_fullscreen_shortcut(function_key)
+
+
+class TestCelebrating:
+    """A personal best has to be visible from the back of the queue, which is
+    the one thing a number turning green cannot do."""
+
+    def test_a_personal_best_sets_them_off(self, finished):
+        assert finished.beat_their_best
+        run_for(finished, 2.0)
+        assert len(finished.fireworks)
+
+    def test_an_ordinary_result_does_not(self, finished):
+        """Spent on every result, the effect marks nothing."""
+        finished.beat_their_best = False
+        run_for(finished, 3.0)
+        assert not len(finished.fireworks)
+
+    def test_they_stop_when_the_next_player_takes_the_wheel(self, finished):
+        run_for(finished, 2.0)
+        press(pygame.K_RETURN)
+        finished.step(DT)
+        assert finished.state is State.COUNTDOWN
+        assert not len(finished.fireworks)
+
+    def test_typing_does_not_blank_the_sky(self, finished):
+        """The form and the celebration share a screen. Sparks vanishing the
+        instant somebody starts typing would read as a crash, so what is in the
+        air finishes falling."""
+        run_for(finished, 2.0)
+        type_text("Marta")
+        finished.step(DT)
+        assert finished.state is State.RESULT
+        assert finished.fireworks.bursting
+
+    def test_they_burn_out_rather_than_running_all_afternoon(self, finished):
+        """RESULT never expires — a time left on screen is the booth
+        advertising itself — so the fireworks have to be the part that stops."""
+        run_for(finished, 2.0)
+        finished.beat_their_best = False
+        run_for(finished, 8.0)
+        assert not len(finished.fireworks)

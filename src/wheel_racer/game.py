@@ -27,7 +27,7 @@ import pygame
 
 from . import config
 from .car import Car
-from .effects import DustCloud, TyreTrail
+from .effects import DustCloud, Fireworks, TyreTrail
 from .inputs import InputSource, PreviewFrame
 from .laptimer import LapTimer
 from .login import LoginForm
@@ -119,6 +119,7 @@ class Game:
         )
         self.trail = TyreTrail()
         self.dust = DustCloud()
+        self.fireworks = Fireworks()
 
         # Signing in is what the booth is actually collecting, so it gates
         # play: there is no way into a run that does not go through the form.
@@ -238,7 +239,18 @@ class Game:
         self.hands_lost_for = 0.0
         return self.steering.update(sample.left, sample.right, dt)
 
+    @property
+    def celebrating(self) -> bool:
+        """Whether the screen should be letting off fireworks."""
+        return self.state is State.RESULT and self.beat_their_best
+
     def _advance(self, steering: float, dt: float) -> None:
+        # Ahead of the state machine, and in every state, because a burst that
+        # is already in the air has to finish falling wherever the player has
+        # got to — including on the sign-in form they just started typing into.
+        self.fireworks.update(dt, self.screen.get_size(), self.celebrating,
+                              self.world.scale)
+
         if self.state is State.LOGIN:
             return
         if self.state is State.ATTRACT:
@@ -335,6 +347,9 @@ class Game:
     def _begin_countdown(self) -> None:
         self.state = State.COUNTDOWN
         self._state_deadline = self.now + COUNTDOWN_SECONDS
+        # Whatever is left of the last player's celebration goes out here rather
+        # than raining down over somebody else's first corner.
+        self.fireworks.clear()
         self.splits = []
         self._level_for = 0.0
         self.steering.reset()
@@ -395,11 +410,13 @@ class Game:
         self.car.reset(x, y, self.car.heading,
                        self.car.speed * self.world.scale / old_scale)
         self.located = self.world.track.locate(self.car.x, self.car.y)
-        # Both are stored in world pixels, so at the new scale they would be
-        # drawn in the wrong places. There is nothing to rescale them from that
-        # is worth the code — a resize is not something that happens mid-corner.
+        # All three are stored in world pixels, so at the new scale they would
+        # be drawn in the wrong places. There is nothing to rescale them from
+        # that is worth the code — a resize is not something that happens
+        # mid-corner, and the fireworks start again on the next frame anyway.
         self.trail.clear()
         self.dust.clear()
+        self.fireworks.clear()
 
     # --- drawing -------------------------------------------------------------
 
@@ -419,6 +436,7 @@ class Game:
 
     def _draw(self, steering: float) -> None:
         self.renderer.draw_world(self.car, steering, self.trail, self.dust)
+        self.renderer.draw_fireworks(self.fireworks)
         self.renderer.draw_preview(self.preview)
 
         if not self.source.is_healthy:

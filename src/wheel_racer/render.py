@@ -16,7 +16,7 @@ import numpy as np
 import pygame
 
 from .car import Car
-from .effects import DustCloud, TyreTrail
+from .effects import DustCloud, Fireworks, TyreTrail
 from .inputs import PreviewFrame
 from .login import LoginForm
 from .trackart import CHEQUER_DARK, CHEQUER_LIGHT, CHECKPOINT, build_track_layer
@@ -38,6 +38,11 @@ LOGIN_WIDTH = 560.0
 FLAG_HEIGHT = 18.0
 FLAG_SQUARES = 16
 FIELD_HEIGHT = 44.0
+
+# How long the chequered flag takes to scroll by two squares, which is one full
+# period of the pattern. Slow on purpose: it should read as a flag moving in the
+# wind beside somebody's time, not as a loading bar under it.
+FLAG_SCROLL_SECONDS = 1.9
 
 CAR_BODY = (228, 84, 62)
 CAR_BODY_DARK = (176, 58, 42)
@@ -178,6 +183,28 @@ class Renderer:
         pygame.draw.polygon(self.screen, CAR_WHEEL,
                             _place(hub, car.x, car.y, car.heading))
 
+    def draw_fireworks(self, fireworks: Fireworks) -> None:
+        """Sparks over the circuit, under everything else.
+
+        Deliberately below the panels rather than over them: the result screen
+        is also the sign-in screen for the next player, and a name being typed
+        through a shower of sparks is unreadable. Underneath, the fireworks
+        frame the panel instead of fighting it.
+
+        Shares the scratch layer with the trail and the dust, which have
+        finished with it by the time this is called.
+
+        Blitted additively, over black, so the sparks behave like light: they
+        brighten the grass rather than sitting on top of it, and where two
+        bursts overlap they pool instead of one hiding the other. Black adds
+        nothing, which is what lets an untouched layer be blitted whole.
+        """
+        if not len(fireworks):
+            return
+        self._scratch.fill((0, 0, 0, 0))
+        fireworks.draw(self._scratch, self.scale)
+        self.screen.blit(self._scratch, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
+
     # --- hud -----------------------------------------------------------------
 
     def draw_hud(
@@ -261,14 +288,27 @@ class Renderer:
         their hands, and neither can whoever is running the booth. The overlaid
         dots and the line between them show exactly what the game is steering
         by, which turns "it's broken" into "step into the light".
+
+        The camera hands this over at a fixed width, which is a *design* width
+        like every other measurement in this module — so it is scaled up here
+        along with everything else. Blitting it at its own size instead left it
+        shrinking against the rest of the screen the bigger the display got,
+        until on a booth monitor the thing a player checks when the car will not
+        turn was a stamp in the corner. Upscaling a webcam thumbnail costs a
+        little sharpness and it is not a picture anyone is studying.
         """
         if preview is None:
             return
 
-        height, width = preview.rgb.shape[:2]
+        source_height, source_width = preview.rgb.shape[:2]
         image = pygame.image.frombuffer(
-            np.ascontiguousarray(preview.rgb).tobytes(), (width, height), "RGB"
+            np.ascontiguousarray(preview.rgb).tobytes(),
+            (source_width, source_height), "RGB"
         )
+        width = round(source_width * self.scale)
+        height = round(source_height * self.scale)
+        if (width, height) != (source_width, source_height):
+            image = pygame.transform.smoothscale(image, (width, height))
 
         left, top = self._preview_anchor((width, height))
         border = max(2, round(2 * self.scale))
@@ -284,22 +324,29 @@ class Renderer:
             self.screen.blit(label, (left + border, top + border))
             return
 
+        # The wrists arrive in the image's own pixels, so they move with it.
         (left_x, left_y), (right_x, right_y) = wrists
-        a = (left + left_x, top + left_y)
-        b = (left + right_x, top + right_y)
+        a = (left + left_x * self.scale, top + left_y * self.scale)
+        b = (left + right_x * self.scale, top + right_y * self.scale)
         pygame.draw.line(self.screen, CHECKPOINT, a, b, max(2, round(3 * self.scale)))
         for point in (a, b):
             pygame.draw.circle(self.screen, TEXT, point, max(4, round(5 * self.scale)))
 
     def _preview_anchor(self, size: tuple[int, int]) -> tuple[int, int]:
-        """Find somewhere to put the preview that is not on top of the circuit.
+        """Find somewhere to put the preview that is not on top of anything.
 
         The obvious answer — a screen corner — is wrong here, because the
         circuit is authored to fill the window and its bulges reach into every
         corner. Hand-picking a gap would work until someone moved a control
-        point, so instead this looks for one: it maps where the grass is, then
-        takes the clear position furthest from the middle of the screen, which
-        keeps the panel out of the way of both the car and the centre overlays.
+        point, so instead this looks for one: it maps where the grass is, rules
+        out where the HUD will be, and takes the clear position furthest from
+        the middle of the screen, which keeps the panel out of the way of both
+        the car and the centre overlays.
+
+        Now that the preview scales with the display, the picture this searches
+        is the same shape at every resolution, so it settles on the same spot —
+        which is what stops the preview wandering between one screen and the
+        next.
 
         Worked out once per preview size and remembered.
         """
@@ -316,7 +363,10 @@ class Renderer:
         step = max(8, round(16 * self.scale))
 
         grass = self._grass_mask(step)
-        columns, rows = round(width / step) + 1, round(height / step) + 1
+        reserved = self._hud_zones()
+        # Rounded up, not to nearest: one sample short leaves a strip along the
+        # right and bottom edges of the preview that nothing ever looked at.
+        columns, rows = math.ceil(width / step) + 1, math.ceil(height / step) + 1
         centre = (screen_width / 2.0, screen_height / 2.0)
 
         best: tuple[int, int] | None = None
@@ -327,19 +377,72 @@ class Renderer:
                               left // step: left // step + columns]
                 if not patch.all():
                     continue
+                here = pygame.Rect(left, top, width, height)
+                if here.collidelist(reserved) != -1:
+                    continue
                 distance = math.hypot(left + width / 2 - centre[0],
                                       top + height / 2 - centre[1])
                 if distance > best_distance:
                     best, best_distance = (left, top), distance
 
         # No clear space anywhere means the circuit fills the screen. Falling
-        # back to a corner covers some tarmac, which is better than no preview.
+        # back to a corner covers some tarmac, which is better than no preview —
+        # the bottom right, because that is the one corner the HUD never uses.
         return best or (screen_width - width - margin, screen_height - height - margin)
 
-    def _grass_mask(self, step: int) -> np.ndarray:
-        """A coarse grid of where the tarmac is not, with room to spare."""
+    def _hud_zones(self) -> list[pygame.Rect]:
+        """Where the HUD will be, which the preview has to stay out of.
+
+        Measured from the widest string each panel can ever hold rather than
+        from what happens to be on screen, because the preview is placed once
+        and the clock does not stay five characters wide all evening.
+
+        Without this the corners look like clear grass, and on a big display
+        they *are* clear — the gap between the screen edge and the circuit grows
+        with the window while the HUD's own margin does not, so past about 1.3x
+        the corner became the position furthest from centre and the preview went
+        and sat underneath the lap clock.
+        """
         screen_width, screen_height = self.screen.get_size()
-        clearance = self.world.track.width / 2.0 + 8.0 * self.scale
+        margin = round(18 * self.scale)
+        # A full clock reads "0:00.00"; the lap counter is never wider.
+        clock = self.font_clock.size("0:00.00")
+        label = self.font_label.size("BEST LAP")
+        value = self.font_body.size("0:00.00")
+
+        top_left = pygame.Rect(margin, margin, clock[0] + 2 * margin,
+                               clock[1] + self.font_label.get_height()
+                               + round(26 * self.scale))
+        best_width = max(label[0], value[0]) + 2 * margin
+        top_right = pygame.Rect(screen_width - margin - best_width, margin, best_width,
+                                label[1] + value[1] + round(22 * self.scale))
+
+        # Worked out the same way `_draw_steering` does, including the knob,
+        # which is a circle of the bar's own height and so sticks out past the
+        # panel behind it at both ends and top and bottom.
+        bar_width = round(260 * self.scale)
+        bar_height = round(10 * self.scale)
+        bar_top = screen_height - round(34 * self.scale)
+        bar_left = (screen_width - bar_width) // 2
+        bar = pygame.Rect(bar_left, bar_top, bar_width, bar_height)
+        knob = bar.inflate(2 * bar_height, 2 * bar_height)
+        steering = bar.inflate(round(12 * self.scale), round(12 * self.scale)).union(knob)
+
+        return [top_left, top_right, steering]
+
+    def _grass_mask(self, step: int) -> np.ndarray:
+        """A coarse grid of where the tarmac is not, with room to spare.
+
+        The grid is sampled every `step` pixels, so the furthest any point can
+        be from the nearest sample is half a step diagonally. The tarmac can
+        come that much closer than the samples admit — which is exactly how a
+        preview ends up with one corner on the racing line while every sample
+        around it reads as grass — so that distance is added to the clearance
+        the samples are tested against.
+        """
+        screen_width, screen_height = self.screen.get_size()
+        unseen = step * math.sqrt(2.0) / 2.0
+        clearance = self.world.track.width / 2.0 + 8.0 * self.scale + unseen
         return np.array([
             [self.world.track.locate(float(x), float(y)).distance > clearance
              for x in range(0, screen_width + step, step)]
@@ -403,8 +506,13 @@ class Renderer:
         panel = pygame.Rect(0, 0, width, height)
         panel.center = self.screen.get_rect().center
         self._panel(panel)
-        self._chequered_strip(pygame.Rect(panel.left, panel.top, width, flag))
-        self._chequered_strip(pygame.Rect(panel.left, panel.bottom - flag, width, flag))
+        # The flag only moves for a personal best. Scrolling it on every result
+        # would spend the effect on the ordinary case and leave nothing to mark
+        # the good one with.
+        phase = self._flag_phase() if celebrate else 0.0
+        self._chequered_strip(pygame.Rect(panel.left, panel.top, width, flag), phase)
+        self._chequered_strip(pygame.Rect(panel.left, panel.bottom - flag, width, flag),
+                              -phase)
 
         y = panel.top + flag + pad
         self.screen.blit(title, (panel.centerx - title.get_width() // 2, y))
@@ -513,16 +621,39 @@ class Renderer:
         """Blinks, so an empty focused field still looks like it wants typing."""
         return pygame.time.get_ticks() % 1000 < 600
 
-    def _chequered_strip(self, rect: pygame.Rect) -> None:
-        """A racing flag along the edge of the panel."""
+    @staticmethod
+    def _flag_phase() -> float:
+        """Where the chequers have scrolled to, in squares.
+
+        Taken from the wall clock rather than counted up per frame, for the same
+        reason the caret blink is: the renderer is handed no dt, and a flag that
+        advanced per frame would run at a different speed on a slower machine.
+        """
+        return (pygame.time.get_ticks() / (FLAG_SCROLL_SECONDS * 1000.0) % 1.0) * 2.0
+
+    def _chequered_strip(self, rect: pygame.Rect, phase: float = 0.0) -> None:
+        """A racing flag along the edge of the panel, optionally scrolling.
+
+        `phase` is in squares, and the pattern repeats every two of them, so any
+        whole-number shift is invisible and the animation loops seamlessly. The
+        strip is clipped and drawn two squares wide either side, so the columns
+        sliding in and out do so behind the edge of the panel rather than
+        appearing out of nothing at it.
+        """
         square = rect.width / FLAG_SQUARES
         half = rect.height / 2
-        for column in range(FLAG_SQUARES):
+        shift = (phase % 2.0) * square
+
+        was_clipped = self.screen.get_clip()
+        self.screen.set_clip(rect)
+        for column in range(-2, FLAG_SQUARES + 2):
             for row in range(2):
                 colour = CHEQUER_LIGHT if (column + row) % 2 else CHEQUER_DARK
                 pygame.draw.rect(self.screen, colour, pygame.Rect(
-                    round(rect.left + column * square), round(rect.top + row * half),
+                    round(rect.left + column * square + shift),
+                    round(rect.top + row * half),
                     round(square) + 1, round(half) + 1))
+        self.screen.set_clip(was_clipped)
 
     def _panel(self, rect: pygame.Rect) -> None:
         """A translucent slab, so text stays readable over grass or tarmac."""
