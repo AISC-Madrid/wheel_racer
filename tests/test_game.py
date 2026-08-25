@@ -16,8 +16,8 @@ import pygame
 import pytest
 
 from wheel_racer import config
-from wheel_racer.game import (COUNTDOWN_SECONDS, Game, State,
-                             _is_fullscreen_shortcut)
+from wheel_racer.display import is_fullscreen_shortcut
+from wheel_racer.game import COUNTDOWN_SECONDS, Game, State
 from wheel_racer.inputs import KeyboardInput, WristSample
 from wheel_racer.players import PlayerBook
 from wheel_racer.world import build_world
@@ -493,9 +493,9 @@ class TestChangingTheWindow:
                                   mod=pygame.KMOD_LMETA)
         function_key = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F11, mod=0)
 
-        assert not _is_fullscreen_shortcut(plain)
-        assert _is_fullscreen_shortcut(held)
-        assert _is_fullscreen_shortcut(function_key)
+        assert not is_fullscreen_shortcut(plain)
+        assert is_fullscreen_shortcut(held)
+        assert is_fullscreen_shortcut(function_key)
 
 
 class TestCelebrating:

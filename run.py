@@ -1,6 +1,14 @@
+"""Start the stand.
+
+One command brings up both screens: the game, and the leaderboard on the other
+monitor. They are still two separate processes with two separate windows — drag
+either onto whichever display it belongs on, then press F11 to fill it.
+"""
+
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -46,6 +54,44 @@ def build_source(args: argparse.Namespace) -> tuple[InputSource, bool]:
         return KeyboardInput(), False
 
 
+def open_leaderboard(display: int) -> subprocess.Popen | None:
+    """Start the second screen alongside the game.
+
+    A child process rather than a second window in this one, so the two screens
+    stay genuinely independent: the leaderboard can be closed and reopened by
+    hand all afternoon, and if it falls over it takes nothing with it. The only
+    thing tying them together is that closing the game closes the board too,
+    which is what you want at the end of the day and never notice before it.
+
+    A failure to start is reported and then ignored. The booth's job is to let
+    people drive; a missing second screen is a worse afternoon, not a lost one.
+    """
+    script = Path(__file__).resolve().parent / "leaderboard.py"
+    try:
+        return subprocess.Popen([sys.executable, str(script),
+                                 "--display", str(display)])
+    except OSError as error:
+        print(f"could not start the leaderboard: {error}", file=sys.stderr)
+        return None
+
+
+def close_leaderboard(child: subprocess.Popen | None) -> None:
+    """Ask the second screen to go, and wait long enough to be sure it did.
+
+    Without the wait, quitting the game leaves the board on the monitor for as
+    long as it takes to notice — which at a stand looks like the thing has
+    hung. If it has not gone by then it is not going to, so it is killed
+    outright rather than left behind on somebody's screen overnight.
+    """
+    if child is None or child.poll() is not None:
+        return
+    child.terminate()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hand-Wheel Racer")
     parser.add_argument(
@@ -62,20 +108,39 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=config.WINDOW_HEIGHT)
     parser.add_argument("--fullscreen", action="store_true",
                         help="open at the desktop resolution (F11 toggles in game)")
+    parser.add_argument("--no-leaderboard", action="store_true",
+                        help="do not open the second screen")
+    parser.add_argument("--leaderboard-display", type=int, default=1,
+                        help="which monitor the leaderboard opens on (default 1)")
     args = parser.parse_args()
 
     source, using_camera = build_source(args)
     print(f"Input: {'camera' if using_camera else 'keyboard'}")
 
-    start(
-        source,
-        args.width,
-        args.height,
-        fullscreen=args.fullscreen,
-        # Starting by holding the bar level only makes sense when there is a bar
-        # to hold. On the keyboard, "level" is just nobody pressing anything.
-        auto_start=using_camera,
-    )
+    leaderboard = None
+    if not args.no_leaderboard:
+        leaderboard = open_leaderboard(args.leaderboard_display)
+        if leaderboard is not None:
+            print("Leaderboard: opened in its own window — drag it to the "
+                  "monitor, then press F11")
+
+    try:
+        start(
+            source,
+            args.width,
+            args.height,
+            fullscreen=args.fullscreen,
+            # Starting by holding the bar level only makes sense when there is a
+            # bar to hold. On the keyboard, "level" is just nobody pressing
+            # anything.
+            auto_start=using_camera,
+        )
+    finally:
+        # In a `finally` rather than an `atexit` hook, so the board also goes
+        # when the game comes down the unhappy way. A booth laptop left showing
+        # a frozen leaderboard next to a crashed game is a worse look than
+        # showing nothing at all.
+        close_leaderboard(leaderboard)
 
 
 if __name__ == "__main__":

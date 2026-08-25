@@ -21,15 +21,18 @@ stays until the next person does something about it.
 
 from __future__ import annotations
 
+import time
 from enum import Enum, auto
 
 import pygame
 
 from . import config
 from .car import Car
+from .display import is_fullscreen_shortcut, open_display, quit_on_signals
 from .effects import DustCloud, Fireworks, TyreTrail
 from .inputs import InputSource, PreviewFrame
 from .laptimer import LapTimer
+from .live import LiveChannel, LiveState
 from .login import LoginForm
 from .players import PlayerBook, normalise_email
 from .recovery import RecoveryMonitor
@@ -48,33 +51,24 @@ MAX_FRAME_SECONDS = 0.05
 COUNTDOWN_SECONDS = 3.0
 RESPAWN_FLASH_SECONDS = 1.2
 
-# Smallest window we will build a circuit in. Nothing breaks above this; below
-# it the fonts bottom out at their minimum size and the panels start to overlap,
-# and at zero width the scale would be zero and the maths would divide by it.
-MIN_WINDOW = (640, 360)
-
-# The fullscreen shortcut, checked ahead of the sign-in form so it cannot be
-# swallowed by whoever is typing. F11 is the convention, but macOS usually eats
-# it before any application sees it, so Cmd-F and Ctrl-F work too — and they
-# need the modifier precisely because a bare F belongs to whoever is spelling
-# their name.
-FULLSCREEN_MODIFIERS = pygame.KMOD_META | pygame.KMOD_CTRL
-
-
-def _is_fullscreen_shortcut(event: pygame.event.Event) -> bool:
-    if event.type != pygame.KEYDOWN:
-        return False
-    if event.key == pygame.K_F11:
-        return True
-    return event.key == pygame.K_f and bool(event.mod & FULLSCREEN_MODIFIERS)
-
-
 class State(Enum):
     LOGIN = auto()
     ATTRACT = auto()
     COUNTDOWN = auto()
     RACING = auto()
     RESULT = auto()
+
+
+# What each state is called on the wire. Spelled out rather than derived from
+# the enum's own names so that renaming a state here cannot silently change
+# what the other screen is being told.
+LIVE_STATE_NAMES = {
+    State.LOGIN: "idle",
+    State.ATTRACT: "ready",
+    State.COUNTDOWN: "countdown",
+    State.RACING: "racing",
+    State.RESULT: "result",
+}
 
 
 class Game:
@@ -88,6 +82,7 @@ class Game:
         auto_start: bool = False,
         book: PlayerBook | None = None,
         fullscreen: bool = False,
+        live: LiveChannel | None = None,
     ) -> None:
         self.source = source
         self.world = world
@@ -124,6 +119,11 @@ class Game:
         # Signing in is what the booth is actually collecting, so it gates
         # play: there is no way into a run that does not go through the form.
         self.book = book if book is not None else PlayerBook()
+        # Where the second screen reads from. Optional, and deliberately
+        # write-only from here: the game never asks the leaderboard anything,
+        # so the leaderboard can be absent, crashed or restarted mid-afternoon
+        # without any of it reaching the person at the wheel.
+        self.live = live
         self.form = LoginForm()
         self.player_name = ""
         self.player_email = ""
@@ -169,7 +169,35 @@ class Game:
         self._advance(steering, dt)
         self._draw(steering)
         pygame.display.flip()
+        if self.live is not None:
+            # After the frame, so what the other screen shows is what this one
+            # just drew rather than a frame ahead of it.
+            self.live.publish(self.live_state())
         return running
+
+    def live_state(self) -> LiveState:
+        """What the second screen needs to know, and nothing more.
+
+        A running clock goes out as the wall-clock time it *started*, so the
+        leaderboard can run its own 60fps timer off a couple of writes a
+        second. `timer.current_time` is measured against this game's own
+        accumulated clock, so it is converted back to wall time here — the one
+        place that knows about both.
+        """
+        running = self.timer.current_time(self.now)
+        started_at = time.time() - running if running is not None else None
+        return LiveState(
+            state=LIVE_STATE_NAMES[self.state],
+            name=self.player_name,
+            lap=min(len(self.splits) + 1, config.LAPS_PER_RUN),
+            laps=config.LAPS_PER_RUN,
+            clock_started_at=started_at,
+            # On the result screen the clock stops but the number stays up, and
+            # it is the best lap that is the score, not the last one.
+            frozen_time=min(self.splits) if self.splits and running is None else None,
+            personal_best=self.personal_best,
+            beat_their_best=self.beat_their_best and self.state is State.RESULT,
+        )
 
     def _handle_events(self) -> bool:
         for event in pygame.event.get():
@@ -180,7 +208,7 @@ class Game:
 
             # Display keys are read before the form gets a look in, so the
             # window can be resized while somebody is halfway through signing in.
-            if _is_fullscreen_shortcut(event):
+            if is_fullscreen_shortcut(event):
                 self.set_fullscreen(not self.fullscreen)
                 continue
             if event.type == pygame.VIDEORESIZE and not self.fullscreen:
@@ -515,47 +543,32 @@ class Game:
         return str(int(remaining) + 1) if remaining > 0 else "GO"
 
 
-def open_display(size: tuple[int, int] | None, fullscreen: bool) -> pygame.Surface:
-    """Open, or reopen, the game window.
-
-    Fullscreen deliberately asks for ``(0, 0)``, which SDL reads as "whatever
-    the desktop is already at". Naming a size instead puts the display through
-    a mode change to something smaller and stretches it back up, which on a
-    booth laptop is a soft, faintly blurry picture. The game scales itself to
-    any window, so it would rather have the real pixels.
-
-    Windowed mode is resizable, because the booth screen is not known in
-    advance and dragging a corner is a faster way to find the size that suits
-    a stand than restarting with different numbers.
-    """
-    if fullscreen:
-        return pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-    width, height = size or (config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
-    return pygame.display.set_mode(
-        (max(width, MIN_WINDOW[0]), max(height, MIN_WINDOW[1])), pygame.RESIZABLE
-    )
-
-
 def start(
     source: InputSource,
     width: int,
     height: int,
     fullscreen: bool = False,
     auto_start: bool = False,
+    publish_live: bool = True,
 ) -> None:
     """Open a window and play until the player quits."""
     pygame.init()
     pygame.display.set_caption("Hand-Wheel Racer — AISC Madrid")
+    quit_on_signals()
 
     # Held keys repeat, so backspacing a mistyped address is one press rather
     # than forty.
     pygame.key.set_repeat(400, 40)
 
     screen = open_display((width, height), fullscreen)
+    live = LiveChannel() if publish_live else None
 
     try:
         Game(source, screen, build_world(*screen.get_size()),
-             auto_start=auto_start, fullscreen=fullscreen).run()
+             auto_start=auto_start, fullscreen=fullscreen, live=live).run()
     finally:
         source.close()
+        # Left behind, the last driver would sit on the other screen all night.
+        if live is not None:
+            live.clear()
         pygame.quit()
