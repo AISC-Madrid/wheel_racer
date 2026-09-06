@@ -74,6 +74,24 @@ Without it everything still works — the game plays, the board shows the stand'
 own results, and finished runs queue on disk until there is somewhere to send
 them. See [`server/README.md`](server/README.md) for the other half.
 
+### Before the doors open
+
+Setting a stand up means driving it, and by the time the fair starts the board
+is a list of the people who set it up. One call clears it:
+
+```bash
+curl -X POST -H "Authorization: Bearer $ADMIN" https://racer.example.com/api/admin/reset
+```
+
+Nothing is deleted — it moves the line the board counts from, and `DELETE` on
+the same URL moves it back. The laptops follow along on their own, so there is
+nothing to clear at the stand and no file to go and find: a booth that sees the
+line move forgets what it knew about who has played here today, and the first
+person through the door gets their personal best like anybody else.
+
+It needs the **admin** token, not the one in the booth's `.env`. The full set
+of things that token can do is in [`server/README.md`](server/README.md).
+
 No webcam handy? No problem:
 
 ```bash
