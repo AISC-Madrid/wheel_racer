@@ -29,12 +29,12 @@ entries either side of the one being removed.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+from ..atomicfile import write_json
 
 DEFAULT_PATH = Path(__file__).resolve().parents[3] / "data" / "outbox"
 
@@ -95,20 +95,12 @@ class Outbox:
         never pick up a half-written run — `os.replace` within a directory is
         atomic, and the reader either sees a whole file or no file.
         """
-        self.path.mkdir(parents=True, exist_ok=True)
         destination = self.path / f"{run.id}{SUFFIX}"
-
-        handle = tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=self.path,
-            prefix=".pending-", suffix=".tmp", delete=False,
-        )
-        try:
-            with handle:
-                json.dump(run.as_json(), handle)
-            os.replace(handle.name, destination)
-        except BaseException:
-            Path(handle.name).unlink(missing_ok=True)
-            raise
+        # Unlike the other two files, this destination is a new name every
+        # time, so nothing can have it open and the retry in `atomicfile`
+        # never has anything to wait for. It is used anyway, so there is
+        # one way of writing a file in this project rather than two.
+        write_json(destination, run.as_json(), prefix=".pending-")
         return destination
 
     def pending(self) -> list[tuple[Path, dict]]:

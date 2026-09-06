@@ -25,29 +25,33 @@ catch it half-written.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import time
 from pathlib import Path
+
+from ..atomicfile import write_json
 
 DATA = Path(__file__).resolve().parents[3] / "data"
 BOARD_PATH = DATA / "board.json"
 ROSTER_PATH = DATA / "known.json"
 
 
-def _write(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent,
-        prefix=f".{path.stem}-", suffix=".tmp", delete=False,
-    )
+def _write(path: Path, payload: dict) -> bool:
+    """Save one of the caches. Returns whether it actually landed.
+
+    Both of these files are written by two processes — the roster by the
+    game after a run and by the station after a lookup — so on Windows a
+    write can arrive while the other one has the file open. `atomicfile`
+    waits that out; if it still cannot be written, the value is kept in
+    memory and the next write puts it right.
+
+    A cache that could not be saved is not worth ending anybody's run
+    over, and this one is called from inside `record`.
+    """
     try:
-        with handle:
-            json.dump(payload, handle)
-        os.replace(handle.name, path)
-    except BaseException:
-        Path(handle.name).unlink(missing_ok=True)
-        raise
+        write_json(path, payload, prefix=f".{path.stem}-")
+    except OSError:
+        return False
+    return True
 
 
 def _read(path: Path) -> dict | None:

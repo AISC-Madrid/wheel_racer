@@ -22,11 +22,11 @@ nothing at all, rather than as a clock that stutters.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+from .atomicfile import write_json
 
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "data" / "live.json"
 
@@ -41,6 +41,18 @@ HEARTBEAT_SECONDS = 0.5
 # the game stutters — is worse than one that takes two seconds to notice a real
 # shutdown.
 STALE_AFTER_SECONDS = 3.0
+
+# How far the start of a running lap may drift before it counts as a different
+# lap. Far below anything a person could see on a clock, and far above the
+# float noise between two ways of measuring the same second.
+CLOCK_TOLERANCE_SECONDS = 0.02
+
+
+def _near(one: float | None, other: float | None) -> bool:
+    """Whether two lap starts are the same instant, allowing for drift."""
+    if one is None or other is None:
+        return one is other
+    return abs(one - other) <= CLOCK_TOLERANCE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -118,9 +130,20 @@ class LiveChannel:
         if not changed and now - self._last_write_at < self.heartbeat:
             return False
 
-        # Stamped at the moment of writing, not the moment of construction, so
-        # a heartbeat re-publish of an unchanged state still counts as fresh.
-        self._write(LiveState(**{**asdict(state), "updated_at": now}))
+        try:
+            # Stamped at the moment of writing, not of construction, so a
+            # heartbeat re-publish of an unchanged state still counts as fresh.
+            self._write(LiveState(**{**asdict(state), "updated_at": now}))
+        except OSError:
+            # This channel is a courtesy to the other screen and nothing
+            # more. The person at the wheel must never find out that it
+            # could not be written — losing one update costs half a second
+            # of a name on a board, and raising here would end their run.
+            #
+            # Nothing is recorded as written, so the next frame tries again
+            # rather than waiting for the heartbeat.
+            return False
+
         self._last_written = state
         self._last_write_at = now
         return True
@@ -130,32 +153,40 @@ class LiveChannel:
 
         `updated_at` is excluded — it changes every frame by definition, and
         comparing it would make every state look new and defeat the throttle.
+
+        `clock_started_at` is compared loosely, and that matters more than it
+        looks. It is worked out as `time.time() - running`, so it names a fixed
+        instant — but the game's accumulated clock and the wall clock drift
+        against each other by microseconds every frame, and compared exactly it
+        is never the same value twice. That turned the throttle off completely:
+        this file was being rewritten sixty times a second instead of two, for
+        a number that had not meaningfully moved, which is thirty times as many
+        chances to collide with the station reading it.
         """
         if self._last_written is None:
             return True
+
         mine, theirs = asdict(state), asdict(self._last_written)
         del mine["updated_at"], theirs["updated_at"]
-        return mine != theirs
+
+        if _near(mine.pop("clock_started_at"), theirs.pop("clock_started_at")):
+            return mine != theirs
+        return True
 
     def _write(self, state: LiveState) -> None:
-        """Replace the file in one step, the way the player book does.
+        """Replace the file in one step.
 
-        The reader is polling this file continuously, so it must never catch a
-        half-written one. `os.replace` within a directory is atomic, which
-        means the reader either sees the old file or the new one.
+        The station is polling this file continuously, so it must never
+        catch a half-written one — see `atomicfile`, which also waits out
+        Windows' habit of refusing to replace a file somebody has open.
         """
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=self.path.parent,
-            prefix=".live-", suffix=".tmp", delete=False,
-        )
-        try:
-            with handle:
-                json.dump(asdict(state), handle)
-            os.replace(handle.name, self.path)
-        except BaseException:
-            Path(handle.name).unlink(missing_ok=True)
-            raise
+        # One attempt and no waiting. This runs inside the game loop, where
+        # blocking for even a few milliseconds is a dropped frame — and
+        # where the retry that matters is simply the next frame, sixteen
+        # milliseconds away, which `publish` arranges by not recording a
+        # failed write as written.
+        write_json(self.path, asdict(state), prefix=".live-",
+                   attempts=1, backoff=0.0)
 
     def clear(self) -> None:
         """Remove the channel, so a stopped game does not leave a stale driver
