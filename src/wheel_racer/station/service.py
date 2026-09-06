@@ -84,10 +84,13 @@ class StationService:
             self._drain()
             self._announce(moment)
             self._refresh(moment)
-        except Unreachable:
-            # The venue's wifi. Not news, not an error, and not worth a line of
-            # output every two seconds for the rest of the afternoon.
-            self._go_offline(moment)
+        except Unreachable as outage:
+            # Usually the venue's wifi: not news, not an error, and not worth a
+            # line of output every two seconds for the rest of the afternoon.
+            # Said once, with the reason, because "unreachable" also covers a
+            # rejected token and a laptop with no certificates, and those two
+            # do not fix themselves by waiting.
+            self._go_offline(moment, outage)
         else:
             self._came_back(moment)
 
@@ -166,10 +169,12 @@ class StationService:
 
     # --- being offline -------------------------------------------------------
 
-    def _go_offline(self, now: float) -> None:
+    def _go_offline(self, now: float, reason: Exception | None = None) -> None:
         if self._offline_since is None:
             self._offline_since = now
-            print("station: server unreachable — queueing until it comes back")
+            because = f" ({reason})" if reason else ""
+            print(f"station: server unreachable{because} — "
+                  "queueing until it comes back")
         self._delay = min(max(BACKOFF_START, self._delay * 2), BACKOFF_MAX)
         self._backoff = now + self._delay
 

@@ -141,11 +141,16 @@ def _classify(error: urllib.error.HTTPError) -> Exception:
       * **401** — a token that is wrong now may be right in a minute, because
         the fix is somebody putting the right one in the environment and
         restarting. Treating it as permanent would throw away the queue over a
-        typo.
+        typo. It says so in as many words, though: a stand told only that the
+        server is unreachable will spend the afternoon rebooting a router that
+        was working the whole time.
       * **429** — rate limited, which is the server asking for a pause and not
         for a surrender.
     """
-    if error.code in (401, 408, 429) or error.code >= 500:
+    if error.code == 401:
+        return Unreachable("HTTP 401 — the server rejected this booth's token; "
+                           "check WHEEL_RACER_BOOTH_TOKEN in .env")
+    if error.code in (408, 429) or error.code >= 500:
         return Unreachable(f"HTTP {error.code}")
 
     try:

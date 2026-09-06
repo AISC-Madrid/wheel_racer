@@ -117,6 +117,22 @@ class TestSendingResults:
         service.tick(now=100.0)
         assert service.outbox.count() == 0
 
+    def test_going_offline_says_why(self, parts, capsys):
+        """The reason is the difference between waiting for wifi that will come
+        back and waiting for a token that never will."""
+        service, server = parts
+        server.reachable = False
+        service.tick(now=100.0)
+        assert "no route to host" in capsys.readouterr().out
+
+    def test_going_offline_is_only_said_once(self, parts, capsys):
+        service, server = parts
+        server.reachable = False
+        service.tick(now=100.0)
+        capsys.readouterr()
+        service.tick(now=200.0)
+        assert capsys.readouterr().out == ""
+
     def test_nothing_is_lost_while_the_server_is_away(self, parts):
         service, server = parts
         server.reachable = False
@@ -347,3 +363,9 @@ class TestClassifyingFailures:
 
     def test_a_refusal_keeps_its_status(self):
         assert _classify(self._error(422)).status == 422
+
+    def test_a_rejected_token_says_so(self):
+        """401 is retried like an outage, but it is not one, and a stand told
+        only "unreachable" goes looking at the router instead of at `.env`."""
+        assert "WHEEL_RACER_BOOTH_TOKEN" in str(_classify(self._error(401)))
+
