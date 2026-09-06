@@ -22,8 +22,19 @@ cv = [
     # this without testing on the machine that will be at the table.
     "mediapipe>=0.10.14,<1.0",
 ]
+# The web server that holds the results. Optional for the same reason the
+# camera stack is: the game has to build and run on a booth laptop without
+# dragging a web framework along, and the container that runs the server has no
+# use for pygame.
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
 dev = [
     "pytest>=8.0",
+    # Starlette's test client is built on httpx. Only the server's tests need
+    # it, and they skip themselves when the server extra is not installed.
+    "httpx>=0.27",
 ]
 
 [build-system]
@@ -34,5 +45,9 @@ build-backend = "hatchling.build"
 packages = ["src/wheel_racer"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
+# The server's tests live next to the server rather than in `tests/`, so that
+# the two halves of the repository stay separable. They skip themselves when
+# the `server` extra is not installed, which keeps `pytest` green on a machine
+# set up only to work on the game.
+testpaths = ["tests", "server/tests"]
+pythonpath = ["src", "server"]
