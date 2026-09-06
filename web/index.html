@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="Live lap times from the Hand-Wheel Racer booth at AISC Madrid.">
+<title>Hand-Wheel Racer — Live Timing</title>
+
+<!--
+  One page, two audiences.
+
+  On a wide screen it is the timing tower that used to be a pygame window on
+  the second monitor: read from three to five metres by somebody who has not
+  decided to stop walking yet, so everything is either bright or background and
+  there are no mid-greys and no thin type. On a phone it is the same data as a
+  list, read from thirty centimetres by somebody who scanned a QR code on the
+  stand — and who is one of a hundred people on the same conference wifi, which
+  is why the whole page is a single file with one image and one request.
+
+  It is deliberately all inline. Not for cleverness: a page that is one round
+  trip is a page that has already loaded by the time somebody looks up from
+  their phone, and the alternative is three requests over a hall's mobile
+  signal to draw eight rows.
+-->
+
+<style>
+  /* The tower's own palette, unchanged. Kept in step with the constants at the
+     top of src/wheel_racer/leaderboard.py — the stand may end up showing both
+     at once during a changeover, and two slightly different blacks next to
+     each other look like a fault. */
+  :root {
+    --backdrop: #0e1016;
+    --backdrop-lit: #161a24;
+    --rule: #2c3240;
+    --text: #f4f6fa;
+    --text-dim: #96a0b2;
+    --live: #78beeb;
+    --ahead: #7ed694;
+    --behind: #e8744a;
+    --gold: #ffcd5c;
+    --silver: #c4cad6;
+    --bronze: #c6844e;
+
+    /* One type scale, driven by the viewport. The tower was authored against a
+       1920x1080 monitor and scaled; this does the same job with clamp(), so a
+       laptop screen, a 4K panel on a stand and a phone all get type sized for
+       the distance they are read from. */
+    --step-0: clamp(0.75rem, 0.9vw + 0.4rem, 1.4rem);
+    --step-1: clamp(0.95rem, 1.3vw + 0.4rem, 2rem);
+    --step-2: clamp(1.3rem, 2.4vw + 0.4rem, 3.6rem);
+    --step-3: clamp(1.8rem, 4vw + 0.4rem, 6rem);
+    --step-4: clamp(2.4rem, 6vw + 0.4rem, 9rem);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--backdrop);
+    color: var(--text);
+    /* The same stack the tower asks pygame for, so the two screens agree about
+       what a digit looks like. Monospace matters here: times are read as a
+       column, and proportional digits make a column that does not line up. */
+    font-family: Menlo, "DejaVu Sans Mono", Consolas, ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    min-height: 100svh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* --- the chequered strips ------------------------------------------------
+     The same racing flag the game draws, as two gradients. Top and bottom, so
+     the page reads as one panel rather than as a web page that happens to be
+     dark. */
+  .flag {
+    height: clamp(10px, 1.6vh, 22px);
+    flex: none;
+    background:
+      repeating-conic-gradient(#f4f6fa 0% 25%, #10131a 0% 50%)
+      0 0 / clamp(20px, 3.2vh, 44px) clamp(20px, 3.2vh, 44px);
+  }
+
+  header {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 0.8em;
+    padding: 0.7em clamp(0.8rem, 2.4vw, 2.8rem);
+    font-size: var(--step-0);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--rule);
+  }
+
+  header img { height: 2.4em; width: auto; opacity: 0.92; }
+  header .title { color: var(--text); font-weight: 700; letter-spacing: 0.2em; }
+  .spacer { flex: 1 1 auto; }
+
+  /* The connection dot. Almost invisible when things are fine, which is the
+     point — a stand screen must not be showing status information to the
+     public. It only earns attention when it turns amber. */
+  .pulse {
+    display: inline-block;
+    width: 0.55em; height: 0.55em;
+    border-radius: 50%;
+    background: var(--ahead);
+    transition: background 400ms;
+  }
+  body[data-connection="stale"] .pulse { background: var(--gold); }
+  body[data-connection="lost"] .pulse { background: var(--behind); }
+
+  main {
+    flex: 1 1 auto;
+    display: grid;
+    gap: clamp(0.6rem, 1.6vh, 1.6rem);
+    padding: clamp(0.6rem, 1.8vh, 1.8rem) clamp(0.8rem, 2.4vw, 2.8rem);
+    grid-template-rows: auto 1fr;
+    min-height: 0;
+    /* Same reason as the name column: without this the widest row decides how
+       wide the page is, and a phone gets a horizontal scrollbar. */
+    min-width: 0;
+  }
+
+  main > * { min-width: 0; }
+
+  /* --- who is driving ------------------------------------------------------ */
+
+  .live {
+    background: var(--backdrop-lit);
+    border: 1px solid var(--rule);
+    border-radius: 0.5rem;
+    padding: clamp(0.7rem, 2vh, 1.6rem) clamp(0.9rem, 2vw, 2rem);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.35em;
+    min-height: 0;
+  }
+
+  .live .label {
+    font-size: var(--step-0);
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--live);
+  }
+
+  .live .driver {
+    font-size: var(--step-3);
+    font-weight: 700;
+    line-height: 1;
+    text-transform: uppercase;
+    /* A long name must shrink rather than wrap: a wrapped name pushes the
+       board off a stand screen, and the board is the thing people came for. */
+    overflow-wrap: anywhere;
+  }
+
+  .live .driver.quiet { color: var(--text-dim); font-size: var(--step-2); }
+  .live .lap { font-size: var(--step-1); color: var(--text-dim); letter-spacing: 0.1em; }
+  .live .stand { font-size: var(--step-0); color: var(--text-dim); letter-spacing: 0.14em; }
+
+  .live-list { display: grid; gap: 0.6em; }
+
+  /* The record, under whoever is driving. It is what the person at the wheel
+     is chasing, and it is what fills this column when the stand is quiet —
+     which at a fair is most of any given minute. */
+  .record {
+    margin-top: auto;
+    padding-top: 0.8em;
+    border-top: 1px solid var(--rule);
+    display: grid;
+    gap: 0.15em;
+  }
+  .record .label { font-size: var(--step-0); letter-spacing: 0.22em;
+                   text-transform: uppercase; color: var(--text-dim); }
+  .record .value { font-size: var(--step-2); font-weight: 700; color: var(--gold); }
+  .record .holder { font-size: var(--step-1); color: var(--text-dim);
+                    text-transform: uppercase; }
+  .record[hidden] { display: none; }
+
+  /* --- the board ----------------------------------------------------------- */
+
+  .board { display: flex; flex-direction: column; min-height: 0; }
+
+  .board h2 {
+    margin: 0 0 0.5em;
+    font-size: var(--step-0);
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  ol.standings {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: clamp(3px, 0.7vh, 10px);
+    /* Eight rows that share whatever height there is, so the board fills a
+       stand's monitor and scrolls on a phone instead of squashing. */
+    grid-auto-rows: minmax(2.6em, auto);
+    min-height: 0;
+  }
+
+  ol.standings li {
+    display: grid;
+    grid-template-columns: 2.2em 1fr auto auto;
+    align-items: center;
+    gap: 0.6em;
+    padding: 0.25em clamp(0.5rem, 1.2vw, 1.1rem);
+    background: var(--backdrop-lit);
+    /* Scaled with the screen, not fixed. Three pixels is a visible edge on a
+       phone held at arm's length and nothing at all on a monitor read from
+       four metres, which is where this marking has to do its work. */
+    border-left: clamp(3px, 0.45vw, 10px) solid transparent;
+    border-radius: 0.3rem;
+    font-size: var(--step-2);
+    font-weight: 700;
+    line-height: 1.1;
+  }
+
+  li .pos { color: var(--text-dim); font-size: 0.72em; }
+  /* `min-width: 0` is what lets a long name be truncated instead of pushing
+     the time and the gap off a phone. A grid column sized `1fr` still refuses
+     to go below its content's width without it, and the whole page then
+     scrolls sideways. */
+  li .name { min-width: 0; text-transform: uppercase; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+  li .time { font-variant-numeric: tabular-nums; }
+  li .gap { font-size: 0.62em; color: var(--behind); min-width: 4.2em; text-align: right; }
+  li .gap.leader { color: var(--gold); }
+
+  li[data-position="1"] { border-left-color: var(--gold); }
+  li[data-position="1"] .name { color: var(--gold); }
+  li[data-position="2"] { border-left-color: var(--silver); }
+  li[data-position="3"] { border-left-color: var(--bronze); }
+
+  /* The row belonging to whoever is at the wheel. The tower marks it too: it
+     is what makes a board people are standing in front of feel live. */
+  li.driving { background: #1d2536; border-left-color: var(--live); }
+  /* The colour is what actually carries across a stand; the edge and the
+     background are for somebody already looking at the row. */
+  li.driving .name { color: var(--live); }
+
+  /* A row that just moved up. The only thing on the board that separates a
+     good lap from a lap that mattered, so it outlasts the change that caused
+     it — same reasoning as PODIUM_FLASH_SECONDS in the tower. */
+  @keyframes climbed {
+    from { background: #3a3218; }
+    to   { background: var(--backdrop-lit); }
+  }
+  li.climbed { animation: climbed 2.4s ease-out; }
+
+  .empty {
+    color: var(--text-dim);
+    font-size: var(--step-1);
+    padding: 1.2em 0;
+    letter-spacing: 0.08em;
+  }
+
+  footer {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em 1.4em;
+    padding: 0.7em clamp(0.8rem, 2.4vw, 2.8rem);
+    border-top: 1px solid var(--rule);
+    font-size: var(--step-0);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  footer a { color: var(--text-dim); }
+
+  /* --- wide screens: the tower --------------------------------------------
+     Chosen on aspect ratio rather than width. A stand's monitor and a laptop
+     are both "wide"; a phone held sideways is not the tower's audience, and
+     asking about shape rather than size is what tells them apart. */
+  @media (min-aspect-ratio: 6/5) and (min-width: 700px) {
+    main {
+      grid-template-columns: 38fr 62fr;   /* LIVE_COLUMN, from the tower */
+      grid-template-rows: 1fr;
+      gap: clamp(0.8rem, 2vw, 2rem);
+    }
+    .live { justify-content: flex-start; padding-top: clamp(1rem, 4vh, 3rem); }
+    .live-list { flex: none; }
+    .live .driver { font-size: var(--step-4); }
+    ol.standings { grid-auto-rows: 1fr; }
+  }
+
+  /* Somebody at a stand watching a screen has not asked for anything to
+     animate, and somebody who has turned motion off has asked for the
+     opposite. The flash is decoration; the number underneath is the content. */
+  @media (prefers-reduced-motion: reduce) {
+    li.climbed { animation: none; }
+    .pulse { transition: none; }
+  }
+</style>
+</head>
+<body data-connection="lost">
+
+<div class="flag" aria-hidden="true"></div>
+
+<header>
+  <img src="/assets/aisc.png" alt="AISC Madrid">
+  <span class="title">Hand-Wheel Racer</span>
+  <span class="spacer"></span>
+  <span class="pulse" id="pulse" role="status" aria-label="connection"></span>
+</header>
+
+<main>
+  <section class="live" aria-live="polite">
+    <div class="label">At the wheel</div>
+    <div class="live-list" id="live"></div>
+    <div class="record" id="record" hidden>
+      <span class="label">Lap record</span>
+      <span class="value" id="record-time"></span>
+      <span class="holder" id="record-holder"></span>
+    </div>
+  </section>
+
+  <section class="board">
+    <h2>Fastest laps</h2>
+    <ol class="standings" id="standings"></ol>
+    <p class="empty" id="empty" hidden>No one has finished a lap yet.</p>
+  </section>
+</main>
+
+<footer>
+  <span id="totals"></span>
+  <span class="spacer"></span>
+  <a href="https://aiscmadrid.com" rel="noopener">AISC Madrid</a>
+</footer>
+
+<script>
+"use strict";
+
+/* How often the page asks for a new board.
+ *
+ * Three seconds is not a compromise between "live" and "cheap" — it is what
+ * the data actually does. A run takes about thirty seconds, so nothing on this
+ * page can change more than once every few seconds, and polling faster would
+ * be a hundred phones asking a question whose answer has not moved. */
+const REFRESH_MS = 3000;
+
+/* After this long without a good answer, say so. Longer than a couple of
+ * missed polls, because a screen that cries wolf every time a packet drops
+ * teaches everyone to ignore it. */
+const STALE_MS = 12000;
+const LOST_MS = 45000;
+
+const BACKOFF_MAX_MS = 20000;
+
+const state = {
+  positions: new Map(),   // name -> last position, for spotting a climb
+  lastGood: 0,
+  backoff: REFRESH_MS,
+  timer: null,
+  settled: false,         // whether a first board has ever been drawn
+};
+
+/* What each booth state says out loud.
+ *
+ * "Countdown" and "ready" both read as "someone is about to go", which from
+ * across a stand is the same event; they are kept apart anyway because the
+ * difference is exactly the moment a passer-by decides to wait and watch. */
+const SAYS = {
+  idle:      { label: "Waiting",      quiet: true,  text: "No one at the wheel" },
+  ready:     { label: "Getting ready", quiet: false, text: null },
+  countdown: { label: "Countdown",    quiet: false, text: null },
+  racing:    { label: "Driving now",  quiet: false, text: null },
+  result:    { label: "Just finished", quiet: false, text: null },
+};
+
+function formatTime(seconds) {
+  if (!Number.isFinite(seconds)) return "--.--";
+  if (seconds < 60) return seconds.toFixed(2);
+  const minutes = Math.floor(seconds / 60);
+  return minutes + ":" + (seconds - minutes * 60).toFixed(2).padStart(5, "0");
+}
+
+function formatGap(gap) {
+  return gap > 0 ? "+" + gap.toFixed(2) : "";
+}
+
+/* --- drawing ------------------------------------------------------------- */
+
+function drawLive(drivers) {
+  const box = document.getElementById("live");
+  box.textContent = "";
+
+  if (!drivers.length) {
+    const line = document.createElement("div");
+    line.className = "driver quiet";
+    line.textContent = "The stand is closed";
+    box.append(line);
+    return;
+  }
+
+  for (const stand of drivers) {
+    const says = SAYS[stand.state] || SAYS.idle;
+    const group = document.createElement("div");
+
+    const name = document.createElement("div");
+    name.className = "driver" + (says.quiet || !stand.driver ? " quiet" : "");
+    name.textContent = says.text || stand.driver || "No one at the wheel";
+    group.append(name);
+
+    const under = document.createElement("div");
+    under.className = "lap";
+    if (stand.state === "racing" && stand.laps) {
+      under.textContent = `Lap ${stand.lap} / ${stand.laps} · ${says.label}`;
+    } else {
+      under.textContent = says.label;
+    }
+    group.append(under);
+
+    // Only worth naming the stand when there is more than one of them. At a
+    // single-table booth "BOOTH-1" is noise on a screen that has none.
+    if (drivers.length > 1) {
+      const where = document.createElement("div");
+      where.className = "stand";
+      where.textContent = stand.station;
+      group.append(where);
+    }
+
+    box.append(group);
+  }
+}
+
+function drawStandings(rows, drivers) {
+  const list = document.getElementById("standings");
+  const empty = document.getElementById("empty");
+
+  empty.hidden = rows.length > 0;
+  list.textContent = "";
+
+  // Matched on first name, which is all the board is given. Two Martas are
+  // told apart by the server before they get here; if it still collides, the
+  // worst case is a row lighting up that should not have, which is a smaller
+  // failure than putting a surname on a public screen to avoid it.
+  const driving = new Set(
+    drivers.filter(d => d.state === "racing" && d.driver)
+           .map(d => d.driver.toLowerCase())
+  );
+
+  for (const row of rows) {
+    const item = document.createElement("li");
+    item.dataset.position = row.position;
+
+    const previous = state.positions.get(row.name);
+    // Not on the first board ever drawn: rows animate *into* their places,
+    // which is right for an overtake and wrong for a screen simply opening.
+    if (state.settled && previous !== undefined && row.position < previous) {
+      item.classList.add("climbed");
+    }
+    if (driving.has(row.name.toLowerCase())) item.classList.add("driving");
+
+    const pos = document.createElement("span");
+    pos.className = "pos";
+    pos.textContent = row.position;
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = row.name;
+
+    const time = document.createElement("span");
+    time.className = "time";
+    time.textContent = formatTime(row.seconds);
+
+    const gap = document.createElement("span");
+    gap.className = "gap" + (row.position === 1 ? " leader" : "");
+    // The leader's row says what the field is chasing rather than "+0.00",
+    // which is the one gap on the board that carries no information.
+    gap.textContent = row.position === 1 ? "LEADER" : formatGap(row.gap);
+
+    item.append(pos, name, time, gap);
+    list.append(item);
+  }
+
+  state.positions = new Map(rows.map(row => [row.name, row.position]));
+  state.settled = true;
+}
+
+function drawRecord(rows) {
+  const box = document.getElementById("record");
+  if (!rows.length) { box.hidden = true; return; }
+  box.hidden = false;
+  document.getElementById("record-time").textContent = formatTime(rows[0].seconds);
+  document.getElementById("record-holder").textContent = rows[0].name;
+}
+
+function drawTotals(board) {
+  const people = board.players === 1 ? "1 driver" : `${board.players} drivers`;
+  const laps = board.runs === 1 ? "1 lap" : `${board.runs} laps`;
+  document.getElementById("totals").textContent = `${people} · ${laps}`;
+}
+
+function markConnection() {
+  // Driven by how old the last *good* answer is rather than by whether the
+  // last request failed. One dropped poll on a conference wifi is not news;
+  // a minute of silence is.
+  const age = Date.now() - state.lastGood;
+  const health = !state.lastGood || age > LOST_MS ? "lost"
+               : age > STALE_MS ? "stale" : "live";
+  document.body.dataset.connection = health;
+}
+
+/* --- talking to the server ----------------------------------------------- */
+
+async function refresh() {
+  try {
+    const response = await fetch("/api/board", { cache: "no-store" });
+    if (!response.ok) throw new Error(response.status);
+    const board = await response.json();
+
+    drawLive(board.live || []);
+    drawStandings(board.standings || [], board.live || []);
+    drawRecord(board.standings || []);
+    drawTotals(board);
+
+    state.lastGood = Date.now();
+    state.backoff = REFRESH_MS;
+  } catch (error) {
+    // Nothing is cleared. The board on screen is the last true thing we know,
+    // and a stand whose screen empties itself the moment the wifi hiccups is
+    // worse than one showing a board that is thirty seconds old.
+    state.backoff = Math.min(state.backoff * 2, BACKOFF_MAX_MS);
+  } finally {
+    markConnection();
+    state.timer = setTimeout(refresh, state.backoff);
+  }
+}
+
+function restart() {
+  clearTimeout(state.timer);
+  refresh();
+}
+
+// A kiosk screen is never hidden, but a phone in a pocket is. Stopping while
+// hidden is most of what keeps a hall full of phones off the server, and
+// coming back immediately is what makes the page feel live when it is looked
+// at again.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") restart();
+  else clearTimeout(state.timer);
+});
+
+window.addEventListener("online", restart);
+
+refresh();
+setInterval(markConnection, 2000);
+</script>
+
+</body>
+</html>

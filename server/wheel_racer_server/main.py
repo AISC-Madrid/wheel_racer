@@ -52,7 +52,12 @@ from .models import (
 # top of the repository rather than inside this package. The container copies
 # it to a fixed place and sets no variable; a developer running from a checkout
 # gets it found for them.
-WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
+REPO = Path(__file__).resolve().parents[2]
+WEB_ROOT = REPO / "web"
+# The stand's logo, served from where the game already keeps it. Copying it
+# into `web/` would put the same image in the repository twice, and the two
+# copies would drift the first time anybody changed it.
+ASSETS = REPO / "assets"
 
 
 @asynccontextmanager
@@ -232,6 +237,9 @@ def erase(request: Erasure,
 
 # Mounted last, so a future endpoint can never be shadowed by a file that
 # happens to share its name.
+if ASSETS.is_dir():
+    app.mount("/assets", StaticFiles(directory=ASSETS), name="assets")
+
 if WEB_ROOT.is_dir():
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
