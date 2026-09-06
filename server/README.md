@@ -69,6 +69,45 @@ curl -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/jso
 Hiding is reversible and keeps the result; erasing is neither. Reach for the
 first one during a fair and the second one only when somebody asks.
 
+### Starting the board again
+
+Setting a stand up means driving it, and none of that belongs on the screen the
+fair sees. Half an hour before the doors open:
+
+```bash
+curl -X POST -H "Authorization: Bearer $ADMIN" https://racer.example.com/api/admin/reset
+# {"since":"2026-03-14T09:12:44.031Z","players":0,"runs":0}
+```
+
+The board is empty, the counters are at nil, and anybody who drove during the
+testing signs in as somebody new — so their first real run is a personal best
+and gets its confetti. **Nothing is deleted.** It is a line the board counts
+from, not a `DELETE`, and everything before it is still in the file and still
+in `players.csv` with the consent that came with it.
+
+The booth laptops follow along on their own. The line travels with the board
+they already poll every three seconds, and a station that sees it move empties
+its own roster of who has played here today. There is nothing to do at the
+stand and no file to go and delete.
+
+Two variations and an undo:
+
+```bash
+# Draw the line somewhere else — the four o'clock realisation that it should
+# have been at two.
+curl -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json"      -d '{"since":"2026-03-14T14:00:00+01:00"}'      https://racer.example.com/api/admin/reset
+
+# Put everything back, whenever it was driven.
+curl -X DELETE -H "Authorization: Bearer $ADMIN" https://racer.example.com/api/admin/reset
+```
+
+`GET /health` reports `board_since`, so "why is the ranking empty" is a
+question answerable from a phone without a token.
+
+A run counts by when it was **driven**, not by when it arrived. A laptop that
+spent the morning offline and empties its queue at two o'clock does not pour
+the morning's testing onto a board that was reset at one.
+
 ## The data
 
 `/data/wheel-racer.sqlite3` holds names, email addresses and the consent stamp
@@ -76,13 +115,14 @@ that goes with them. It is one file, so a backup is a copy — but it is a copy
 of everybody's contact details, so it goes somewhere encrypted or it does not
 leave the machine.
 
-Three tables, and the whole schema is in `wheel_racer_server/db.py`:
+Four tables, and the whole schema is in `wheel_racer_server/db.py`:
 
 * `players` — one row per address, with the terms they agreed to and when.
 * `runs` — every lap anybody has driven. A player's best is `MIN(seconds)` over
   these rather than a stored column, so a moderation delete or a late arrival
   from a booth's queue cannot leave two facts disagreeing.
 * `stations` — what each booth is doing right now. Ages out on its own.
+* `meta` — one row, holding the moment the board counts from.
 
 ## Working on it
 

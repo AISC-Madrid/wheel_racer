@@ -60,6 +60,15 @@ MIGRATIONS: list[str] = [
         updated_at REAL NOT NULL
     );
     """,
+    # v2 — the line the board counts from, so a fair can start at nil without
+    # anything being deleted. One row in a table of settings rather than a
+    # column on anything: it is a property of the server, not of a player.
+    """
+    CREATE TABLE meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    """,
 ]
 
 

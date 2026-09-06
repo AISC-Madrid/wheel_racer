@@ -165,6 +165,16 @@ class Board(BaseModel):
     players: int
     runs: int
     generated_at: datetime
+    since: datetime | None = None
+    """What this board is counting from, or None for everything ever driven.
+
+    Here for the booth rather than for the page: a laptop keeps its own copy of
+    who has played and what they have to beat, and a reset it never hears about
+    would leave it greeting the fair's first visitor with a time set while the
+    stand was being tested. Sending the line with the board means one call to
+    the server resets every screen at the stand, including the ones in front of
+    the people driving.
+    """
 
 
 class Health(BaseModel):
@@ -176,6 +186,37 @@ class Health(BaseModel):
     runs: int
     terms_url: str
     terms_version: str
+    board_since: datetime | None = None
+    """Where the board is counting from, or None for everything ever driven.
+
+    Here because "the ranking is empty and I do not know why" is a question
+    somebody will ask from a phone at a stand, and this is the endpoint that
+    answers questions about the deployment without a token.
+    """
+
+
+class Reset(BaseModel):
+    """Start the board again, from now or from a chosen moment.
+
+    An empty body is the one that gets used: at a stand, "reset" is a thing
+    somebody does thirty seconds before the doors open. `since` exists for the
+    other case — realising at four o'clock that the line should have been drawn
+    at two.
+    """
+
+    since: datetime | None = None
+
+
+class ResetReceipt(BaseModel):
+    """Where the board now counts from, and what is left on it.
+
+    The counts are the confirmation. A reset that says `players: 0` has plainly
+    worked, and one that does not has plainly hit the wrong moment.
+    """
+
+    since: datetime | None
+    players: int
+    runs: int
 
 
 class Moderation(BaseModel):

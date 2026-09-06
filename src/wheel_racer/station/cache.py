@@ -120,6 +120,17 @@ class Roster:
         best = entry.get("best_seconds") if entry else None
         return float(best) if isinstance(best, (int, float)) else None
 
+    def forget_everyone(self) -> None:
+        """Empty the roster, because the fair it belonged to is over.
+
+        Called when the server says the board now counts from a later moment
+        than the one this laptop last heard about. What is cached here is
+        exactly what the reset was for — a morning of testing, and the record
+        it left in front of the first person to walk up.
+        """
+        self._people = {}
+        _write(self.path, self._people)
+
     def remember(self, email_key: str, name: str, best_seconds: float | None,
                  **extra) -> None:
         """Record what is known about somebody.

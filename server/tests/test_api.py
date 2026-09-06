@@ -276,3 +276,59 @@ def test_the_limit_never_touches_reading(client, monkeypatch):
     monkeypatch.setenv("WHEEL_RACER_WRITES_PER_MINUTE", "2")
     settings.cache_clear()
     assert all(client.get("/api/board").status_code == 200 for _ in range(50))
+
+
+# --- starting the board again ------------------------------------------------
+
+def test_a_reset_clears_the_public_board(client, booth, admin):
+    client.post("/api/runs", json=run_payload(), headers=booth)
+    response = client.post("/api/admin/reset", headers=admin)
+    assert response.status_code == 200
+    assert response.json()["players"] == 0
+    assert client.get("/api/board").json()["standings"] == []
+
+
+def test_a_reset_needs_the_admin_token(client, booth):
+    assert client.post("/api/admin/reset", headers=booth).status_code == 401
+    assert client.post("/api/admin/reset").status_code == 401
+
+
+def test_a_reset_leaves_the_mailing_list_alone(client, booth, admin):
+    client.post("/api/runs", json=run_payload(), headers=booth)
+    client.post("/api/admin/reset", headers=admin)
+    assert "Marta" in client.get("/api/admin/players.csv", headers=admin).text
+
+
+def test_a_reset_makes_a_returning_player_new_again(client, booth, admin):
+    client.post("/api/runs", json=run_payload(), headers=booth)
+    client.post("/api/admin/reset", headers=admin)
+    response = client.post("/api/players/lookup", headers=booth,
+                           json={"email": "marta@example.com"})
+    assert response.status_code == 404
+
+
+def test_a_reset_can_be_undone_over_http(client, booth, admin):
+    client.post("/api/runs", json=run_payload(), headers=booth)
+    client.post("/api/admin/reset", headers=admin)
+    response = client.delete("/api/admin/reset", headers=admin)
+    assert response.json() == {"since": None, "players": 1, "runs": 1}
+    assert len(client.get("/api/board").json()["standings"]) == 1
+
+
+def test_the_undo_needs_the_admin_token(client, booth):
+    assert client.delete("/api/admin/reset", headers=booth).status_code == 401
+
+
+def test_a_reset_can_be_dated(client, booth, admin):
+    """The four o'clock realisation that the line should have been at two."""
+    client.post("/api/runs", json=run_payload(raced_at="2026-03-14T11:02:03+01:00"),
+                headers=booth)
+    client.post("/api/admin/reset", headers=admin,
+                json={"since": "2026-03-14T09:00:00+00:00"})
+    assert len(client.get("/api/board").json()["standings"]) == 1
+
+
+def test_health_says_where_the_board_counts_from(client, admin):
+    assert client.get("/health").json()["board_since"] is None
+    client.post("/api/admin/reset", headers=admin)
+    assert client.get("/health").json()["board_since"] is not None

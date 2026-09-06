@@ -15,6 +15,12 @@ Two things are worth knowing before reading the queries:
     threw away everything that was not their record. Keeping the runs costs
     nothing, is what makes the retry-safe queue possible at all, and means
     "how many people played on Saturday" is a question with an answer.
+  * **The board counts from a line, not from the beginning.** An afternoon of
+    setting the stand up is an afternoon of lap times that must not be on the
+    screen when the doors open, and the answer is a cutoff rather than a
+    delete: move the line, and everything before it stops counting while
+    staying in the file for the export. Every query below that a visitor can
+    see the result of respects it, and `export` deliberately does not.
 """
 
 from __future__ import annotations
@@ -36,6 +42,14 @@ from .models import (
 # stored before this, and what the board renders. Rounding on the way in rather
 # than on the way out means the number in the database is the number on screen.
 PRECISION = 2
+
+# The row in `meta` holding the cutoff, and the value that means "count
+# everything". The empty string rather than NULL, because every stored date is
+# an ISO 8601 stamp and every ISO 8601 stamp sorts after "" — so the filter is
+# the same comparison whether a fair has been reset or not, and there is no
+# second version of any query below to keep in step with the first.
+BOARD_SINCE = "board_since"
+ALL_TIME = ""
 
 
 def normalise_email(email: str) -> str:
@@ -63,6 +77,37 @@ def _stamp(moment: datetime) -> str:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     return moment.astimezone(timezone.utc).isoformat()
+
+
+# --- where the board counts from ---------------------------------------------
+
+def board_since(connection: sqlite3.Connection) -> str:
+    """The moment the current fair started, or `ALL_TIME` if it never has."""
+    row = connection.execute(
+        "SELECT value FROM meta WHERE key = ?", (BOARD_SINCE,)
+    ).fetchone()
+    return row["value"] if row is not None else ALL_TIME
+
+
+def set_board_since(connection: sqlite3.Connection,
+                    moment: datetime | None) -> str:
+    """Start the board again from `moment`, or from the beginning if None.
+
+    Nothing is deleted and nothing is unrecoverable: this moves a line, and
+    moving it back brings every run before it into view again. That is the
+    whole reason it is a stored timestamp rather than a `DELETE`.
+    """
+    stamp = ALL_TIME if moment is None else _stamp(moment)
+    with connection:
+        if stamp == ALL_TIME:
+            connection.execute("DELETE FROM meta WHERE key = ?", (BOARD_SINCE,))
+        else:
+            connection.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?)"
+                " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (BOARD_SINCE, stamp),
+            )
+    return stamp
 
 
 # --- writing -----------------------------------------------------------------
@@ -173,8 +218,17 @@ def forget_station(connection: sqlite3.Connection, station: str) -> None:
 # --- reading -----------------------------------------------------------------
 
 def _best(connection: sqlite3.Connection, key: str) -> float | None:
+    """This player's record, as far as the current fair is concerned.
+
+    Scoped to the cutoff like everything else the booth shows, so that after a
+    reset the first run of the day is a personal best and gets its confetti,
+    instead of being measured against a time set while the stand was being
+    tested and which is now on no screen anywhere.
+    """
     row = connection.execute(
-        "SELECT MIN(seconds) AS best FROM runs WHERE email_key = ?", (key,)
+        "SELECT MIN(seconds) AS best FROM runs"
+        " WHERE email_key = ? AND raced_at >= ?",
+        (key, board_since(connection)),
     ).fetchone()
     return row["best"] if row and row["best"] is not None else None
 
@@ -194,11 +248,11 @@ def position(connection: sqlite3.Connection, key: str) -> int | None:
         SELECT COUNT(*) AS ahead FROM (
             SELECT MIN(r.seconds) AS best
             FROM runs r JOIN players p ON p.email_key = r.email_key
-            WHERE p.hidden = 0 AND r.email_key != ?
+            WHERE p.hidden = 0 AND r.email_key != ? AND r.raced_at >= ?
             GROUP BY r.email_key
         ) WHERE best < ?
         """,
-        (key, best),
+        (key, board_since(connection), best),
     ).fetchone()["ahead"]
     return ahead + 1
 
@@ -216,13 +270,18 @@ def count_players(connection: sqlite3.Connection) -> int:
         """
         SELECT COUNT(DISTINCT r.email_key) AS total
         FROM runs r JOIN players p ON p.email_key = r.email_key
-        WHERE p.hidden = 0
-        """
+        WHERE p.hidden = 0 AND r.raced_at >= ?
+        """,
+        (board_since(connection),),
     ).fetchone()["total"]
 
 
 def count_runs(connection: sqlite3.Connection) -> int:
-    return connection.execute("SELECT COUNT(*) AS total FROM runs").fetchone()["total"]
+    """How many laps this fair has seen. Not how many the file holds."""
+    return connection.execute(
+        "SELECT COUNT(*) AS total FROM runs WHERE raced_at >= ?",
+        (board_since(connection),),
+    ).fetchone()["total"]
 
 
 def summary(connection: sqlite3.Connection, email: str) -> PlayerSummary | None:
@@ -240,8 +299,16 @@ def summary(connection: sqlite3.Connection, email: str) -> PlayerSummary | None:
         return None
 
     runs = connection.execute(
-        "SELECT COUNT(*) AS total FROM runs WHERE email_key = ?", (key,)
+        "SELECT COUNT(*) AS total FROM runs"
+        " WHERE email_key = ? AND raced_at >= ?",
+        (key, board_since(connection)),
     ).fetchone()["total"]
+    if not runs:
+        # Known to the file, but not to this fair. Answering with a record the
+        # board does not show would put a time on the sign-in screen that the
+        # player cannot find anywhere behind them, so they are somebody new —
+        # which, on the only afternoon that counts, they are.
+        return None
     return PlayerSummary(name=row["name"], best_seconds=_best(connection, key),
                          runs=runs, position=position(connection, key))
 
@@ -257,12 +324,12 @@ def standings(connection: sqlite3.Connection, limit: int) -> list[Standing]:
         """
         SELECT p.email_key, p.name, MIN(r.seconds) AS best
         FROM runs r JOIN players p ON p.email_key = r.email_key
-        WHERE p.hidden = 0
+        WHERE p.hidden = 0 AND r.raced_at >= ?
         GROUP BY p.email_key
         ORDER BY best ASC, p.first_seen_at ASC
         LIMIT ?
         """,
-        (limit,),
+        (board_since(connection), limit),
     ).fetchall()
     if not rows:
         return []
@@ -305,6 +372,7 @@ def board(connection: sqlite3.Connection, limit: int,
         players=count_players(connection),
         runs=count_runs(connection),
         generated_at=_now(),
+        since=board_since(connection) or None,
     )
 
 
@@ -383,6 +451,11 @@ def export(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     Consent travels with the address on purpose. An export that is only names
     and emails is an export somebody will one day have to justify, and the two
     columns that justify it are right here.
+
+    The one reader that ignores the board's cutoff. Somebody who drove during
+    the morning's testing still agreed to the terms and still asked for the
+    newsletter, and a reset is a decision about a screen — not about who the
+    stand met.
     """
     return connection.execute(
         """

@@ -7,6 +7,8 @@ different program.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from wheel_racer_server import store
@@ -263,3 +265,92 @@ def test_the_export_carries_the_consent(db):
 
 def test_summary_of_someone_who_never_played(db):
     assert store.summary(db, "nobody@example.com") is None
+
+
+# --- starting the board again ------------------------------------------------
+#
+# The morning of a fair is spent setting a stand up, and setting a stand up
+# means driving it. None of that may be on the screen when the doors open, and
+# none of it may be lost either: those are people who agreed to be emailed.
+
+MORNING = "2026-03-14T09:00:00+00:00"
+NOON = datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc)
+AFTERNOON = "2026-03-14T14:00:00+01:00"
+
+
+def test_a_fresh_database_counts_everything(db):
+    assert store.board_since(db) == store.ALL_TIME
+
+
+def test_a_reset_empties_the_board(db):
+    submit(db, raced_at=MORNING)
+    store.set_board_since(db, NOON)
+    assert store.standings(db, limit=8) == []
+    assert store.count_players(db) == 0
+    assert store.count_runs(db) == 0
+
+
+def test_a_reset_deletes_nothing(db):
+    submit(db, raced_at=MORNING)
+    store.set_board_since(db, NOON)
+    assert store.export(db)[0]["runs"] == 1
+
+
+def test_a_reset_can_be_undone(db):
+    submit(db, raced_at=MORNING)
+    store.set_board_since(db, NOON)
+    store.set_board_since(db, None)
+    assert len(store.standings(db, limit=8)) == 1
+    assert store.board_since(db) == store.ALL_TIME
+
+
+def test_runs_driven_after_the_reset_count(db):
+    submit(db, raced_at=MORNING)
+    store.set_board_since(db, NOON)
+    submit(db, id="run-0002", seconds=20.0, raced_at=AFTERNOON)
+    assert [row.seconds for row in store.standings(db, limit=8)] == [20.0]
+
+
+def test_a_returning_player_starts_the_fair_as_a_stranger(db):
+    """Otherwise the sign-in screen tells them to beat a time that is on no
+    board anywhere, and their first run of the day gets no confetti."""
+    submit(db, raced_at=MORNING)
+    store.set_board_since(db, NOON)
+    assert store.summary(db, "marta@example.com") is None
+
+
+def test_the_first_run_after_a_reset_is_a_personal_best(db):
+    submit(db, seconds=10.0, raced_at=MORNING)
+    store.set_board_since(db, NOON)
+    receipt = submit(db, id="run-0002", seconds=30.0, raced_at=AFTERNOON)
+    assert receipt.improved
+    assert receipt.previous_best is None
+    assert receipt.best_seconds == 30.0
+
+
+def test_a_late_queue_does_not_reach_a_reset_board(db):
+    """A laptop that spent the morning offline empties its queue in the
+    afternoon. Those runs were driven before the line and stay behind it."""
+    store.set_board_since(db, NOON)
+    submit(db, raced_at=MORNING)
+    assert store.standings(db, limit=8) == []
+
+
+def test_the_cutoff_survives_a_restart(db):
+    """It is in the file, not in the process: a container that restarts in the
+    middle of a fair must not put the morning's testing back on the screen."""
+    submit(db, raced_at=MORNING)
+    store.set_board_since(db, NOON)
+    again = connect()
+    try:
+        migrate(again)
+        assert store.standings(again, limit=8) == []
+    finally:
+        again.close()
+
+
+def test_resetting_twice_keeps_the_later_line(db):
+    store.set_board_since(db, NOON)
+    later = NOON + timedelta(hours=1)
+    store.set_board_since(db, later)
+    assert store.board_since(db) == later.isoformat()

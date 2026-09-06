@@ -49,6 +49,8 @@ class FakeServer:
     def __init__(self, *, reachable: bool = True, refuse: bool = False) -> None:
         self.reachable = reachable
         self.refuse = refuse
+        self.since: str | None = None
+        """What the board says it is counting from, as a reset would set it."""
         self.submitted: list[dict] = []
         self.stations: list[dict] = []
         self.closed: list[str] = []
@@ -79,7 +81,7 @@ class FakeServer:
         self._check()
         self.boards += 1
         return {"standings": [{"position": 1, "name": "Marta", "seconds": 13.5}],
-                "live": [], "players": 9, "runs": 20}
+                "live": [], "players": 9, "runs": 20, "since": self.since}
 
 
 @pytest.fixture
@@ -369,3 +371,55 @@ class TestClassifyingFailures:
         only "unreachable" goes looking at the router instead of at `.env`."""
         assert "WHEEL_RACER_BOOTH_TOKEN" in str(_classify(self._error(401)))
 
+
+class TestFollowingAReset:
+    """A reset happens on the server, and this laptop is the one thing that
+    would not otherwise notice: it answers sign-ins out of its own roster
+    first, so it has to be told that the fair it belongs to is over."""
+
+    def _seed(self, service, server) -> None:
+        """Get one board cached, so there is something to compare against."""
+        service.tick(now=100.0)
+        service.roster.remember("marta@example.com", name="Marta",
+                                best_seconds=13.5)
+
+    def test_a_reset_empties_the_roster(self, parts):
+        service, server = parts
+        self._seed(service, server)
+        server.since = "2026-03-14T12:00:00+00:00"
+        service.tick(now=200.0)
+        assert service.roster.best_for("marta@example.com") is None
+
+    def test_an_unchanged_board_leaves_the_roster_alone(self, parts):
+        service, server = parts
+        self._seed(service, server)
+        service.tick(now=200.0)
+        assert service.roster.best_for("marta@example.com") == 13.5
+
+    def test_a_reset_is_only_followed_once(self, parts):
+        service, server = parts
+        server.since = "2026-03-14T12:00:00+00:00"
+        self._seed(service, server)
+        service.tick(now=200.0)
+        assert service.roster.best_for("marta@example.com") == 13.5
+
+    def test_the_undo_is_followed_too(self, parts):
+        service, server = parts
+        server.since = "2026-03-14T12:00:00+00:00"
+        service.tick(now=100.0)
+        service.roster.remember("marta@example.com", name="Marta",
+                                best_seconds=13.5)
+        server.since = None
+        service.tick(now=200.0)
+        assert service.roster.best_for("marta@example.com") is None
+
+    def test_a_first_board_never_wipes_what_is_on_disk(self, parts):
+        """A laptop that played offline and is only now reaching the server has
+        a roster worth keeping: it has never been told a cutoff to disagree
+        with."""
+        service, server = parts
+        server.since = "2026-03-14T12:00:00+00:00"
+        service.roster.remember("marta@example.com", name="Marta",
+                                best_seconds=13.5)
+        service.tick(now=100.0)
+        assert service.roster.best_for("marta@example.com") == 13.5

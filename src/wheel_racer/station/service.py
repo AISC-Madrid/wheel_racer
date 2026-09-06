@@ -164,8 +164,30 @@ class StationService:
     def _refresh(self, now: float) -> None:
         if now - self._board_fetched_at < self.settings.board_refresh_seconds:
             return
-        self.board.store(self.client.board(), now)
+        fresh = self.client.board()
+        self._follow_reset(fresh)
+        self.board.store(fresh, now)
         self._board_fetched_at = now
+
+    def _follow_reset(self, fresh: dict) -> None:
+        """Drop the local roster when the fair has been started again.
+
+        A reset happens on the server, from a phone, thirty seconds before the
+        doors open — and this laptop is the one thing that would not have
+        noticed. It answers sign-ins out of its own cache first, so without
+        this it would go on telling the morning's testers what their record was
+        long after the board stopped showing it.
+
+        Compared against the cached board rather than against anything held in
+        memory, so restarting the game mid-fair does not wipe an afternoon of
+        local knowledge that is still perfectly good — and, more to the point,
+        still the only thing answering sign-ins while the wifi is away.
+        """
+        cached = self.board.latest()
+        if cached is None or fresh.get("since") == cached.get("since"):
+            return
+        self.roster.forget_everyone()
+        print("station: the board was reset — starting this laptop over too")
 
     # --- being offline -------------------------------------------------------
 
