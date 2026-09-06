@@ -66,10 +66,16 @@ class Client:
         """File one finished run. Safe to call again with the same id."""
         return self._call("POST", "/api/runs", run) or {}
 
-    def lookup(self, email: str) -> dict | None:
-        """What this address has done before, or None if it is somebody new."""
+    def lookup(self, email: str, timeout: float | None = None) -> dict | None:
+        """What this address has done before, or None if it is somebody new.
+
+        Takes its own timeout because this is the one call with a person
+        waiting on the other end of it: the game is blocked behind it at the
+        sign-in screen, and there a slow answer is worth no more than none.
+        """
         try:
-            return self._call("POST", "/api/players/lookup", {"email": email})
+            return self._call("POST", "/api/players/lookup", {"email": email},
+                              timeout=timeout)
         except Refused as refusal:
             # Never having played is an ordinary answer, not a problem: it is
             # what happens every time somebody new walks up to the stand.
@@ -94,7 +100,8 @@ class Client:
 
     # --- the wire ------------------------------------------------------------
 
-    def _call(self, method: str, path: str, payload: dict | None) -> dict | None:
+    def _call(self, method: str, path: str, payload: dict | None,
+              timeout: float | None = None) -> dict | None:
         request = urllib.request.Request(
             self.base_url.rstrip("/") + path,
             method=method,
@@ -109,7 +116,8 @@ class Client:
         )
 
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(
+                    request, timeout=timeout or self.timeout) as response:
                 body = response.read()
                 return json.loads(body) if body else None
         except urllib.error.HTTPError as error:

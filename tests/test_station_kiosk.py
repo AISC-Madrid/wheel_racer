@@ -36,8 +36,10 @@ class FakeServer:
         self.knows = knows or {}
         self.reachable = reachable
         self.asked: list[str] = []
+        self.timeouts: list[float | None] = []
 
-    def lookup(self, email: str) -> dict | None:
+    def lookup(self, email: str, timeout: float | None = None) -> dict | None:
+        self.timeouts.append(timeout)
         if not self.reachable:
             raise Unreachable("no route to host")
         self.asked.append(email)
@@ -140,6 +142,14 @@ class TestLookingSomebodyUp:
         _, body = post(kiosk, "/booth/lookup", {"email": "far@example.com"})
         assert body["best_seconds"] == 12.0
         assert body["source"] == "server"
+
+    def test_the_game_is_never_left_waiting_on_the_default_timeout(self, kiosk):
+        """Four seconds is fine for a queue draining in the background and far
+        too long with somebody standing at the sign-in screen."""
+        kiosk.client.knows["far@example.com"] = {"name": "Lejos",
+                                                 "best_seconds": 12.0}
+        post(kiosk, "/booth/lookup", {"email": "far@example.com"})
+        assert kiosk.client.timeouts == [1.5]
 
     def test_a_fetched_player_is_remembered_for_next_time(self, kiosk):
         kiosk.client.knows["far@example.com"] = {"name": "Lejos",

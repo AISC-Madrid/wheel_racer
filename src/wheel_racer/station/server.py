@@ -170,7 +170,10 @@ class Kiosk:
         if self.client is None:
             return None
         try:
-            found = self.client.lookup(key)
+            # A shorter timeout than the client's usual one. The game is
+            # blocked behind this call with somebody standing at the machine,
+            # and a slow answer is worth no more to them than no answer.
+            found = self.client.lookup(key, timeout=LOOKUP_TIMEOUT)
         except (Unreachable, Refused):
             return None
         if found is None:

@@ -12,12 +12,14 @@ from wheel_racer.login import (
     EMAIL_LIMIT,
     EMAIL_MAX,
     NAME_LIMIT,
+    Consent,
     LoginForm,
+    consent_error,
     email_error,
     name_error,
 )
 
-NAME, EMAIL = 0, 1
+NAME, EMAIL, TERMS = 0, 1, 2
 
 
 def key(code: int = 0, character: str = "") -> pygame.event.Event:
@@ -27,6 +29,16 @@ def key(code: int = 0, character: str = "") -> pygame.event.Event:
 def typed(form: LoginForm, text: str) -> None:
     for character in text:
         form.handle(key(character=character))
+
+
+def signed_in(form: LoginForm, name: str = "john",
+              email: str = "john@example.com") -> None:
+    """Fill the form the way a player does: type, tab, type, tab, space."""
+    typed(form, name)
+    form.handle(key(pygame.K_TAB))
+    typed(form, email)
+    form.handle(key(pygame.K_TAB))
+    form.handle(key(character=" "))
 
 
 @pytest.fixture
@@ -46,8 +58,8 @@ class TestTyping:
         assert (form.name, form.email) == ("john", "john@example.com")
 
     def test_tab_wraps_round(self, form):
-        form.handle(key(pygame.K_TAB))
-        form.handle(key(pygame.K_TAB))
+        for _ in form.fields:
+            form.handle(key(pygame.K_TAB))
         assert form.focused == NAME
 
     def test_backspace_deletes(self, form):
@@ -96,10 +108,8 @@ class TestSubmitting:
         assert form.focused == EMAIL
         assert not form.submitted
 
-    def test_enter_signs_in_from_a_filled_address(self, form):
-        typed(form, "john")
-        form.handle(key(pygame.K_TAB))
-        typed(form, "john@example.com")
+    def test_enter_signs_in_from_a_filled_form(self, form):
+        signed_in(form)
         form.handle(key(pygame.K_RETURN))
         assert form.submitted
 
@@ -218,3 +228,110 @@ class TestValidation:
 
     def test_any_real_name_is_accepted(self):
         assert name_error("Ada") is None
+
+
+class TestConsent:
+    """The box that has to be ticked before anybody drives.
+
+    The booth keeps names and addresses and sends them to a server, so this is
+    the field that decides whether a run may be recorded at all. What is worth
+    pinning is that it cannot be ticked by accident and does not carry over to
+    the next person — everything else about it is decoration.
+    """
+
+    def test_the_form_starts_unticked(self, form):
+        assert not form.consent.checked
+
+    def test_space_ticks_it(self, form):
+        form.focused = TERMS
+        form.handle(key(character=" "))
+        assert form.consent.checked
+
+    def test_space_again_unticks_it(self, form):
+        form.focused = TERMS
+        form.handle(key(character=" "))
+        form.handle(key(character=" "))
+        assert not form.consent.checked
+
+    def test_enter_does_not_tick_it(self, form):
+        """ENTER is the key everybody is already pressing to get through the
+        form. If it agreed to things, nobody would have agreed to anything."""
+        form.focused = TERMS
+        form.handle(key(pygame.K_RETURN))
+        assert not form.consent.checked
+
+    def test_no_other_key_ticks_it(self, form):
+        form.focused = TERMS
+        typed(form, "yes")
+        assert not form.consent.checked
+
+    def test_typing_at_it_does_not_become_a_name(self, form):
+        form.focused = TERMS
+        typed(form, "hello")
+        assert form.name == ""
+
+    def test_backspace_at_it_is_harmless(self, form):
+        form.focused = TERMS
+        form.handle(key(pygame.K_BACKSPACE))
+        assert not form.consent.checked
+
+    def test_an_unticked_box_refuses_the_form(self, form):
+        typed(form, "john")
+        form.handle(key(pygame.K_TAB))
+        typed(form, "john@example.com")
+        assert not form.submit()
+        assert form.focused == TERMS
+        assert form.error
+
+    def test_a_ticked_box_lets_a_valid_form_through(self, form):
+        signed_in(form)
+        assert form.submit()
+
+    def test_ticking_is_not_enough_on_its_own(self, form):
+        form.focused = TERMS
+        form.handle(key(character=" "))
+        assert not form.submit()
+        assert form.focused == NAME
+
+    def test_when_it_was_agreed_to_is_recorded(self, form):
+        assert form.accepted_at is None
+        signed_in(form)
+        assert form.accepted_at is not None
+
+    def test_unticking_forgets_when(self, form):
+        form.focused = TERMS
+        form.handle(key(character=" "))
+        form.handle(key(character=" "))
+        assert form.accepted_at is None
+
+    def test_consent_does_not_carry_over_to_the_next_person(self, form):
+        """The one field on this panel that has to be given again by whoever
+        is about to drive."""
+        signed_in(form)
+        form.clear()
+        assert not form.consent.checked
+        assert form.accepted_at is None
+
+    def test_an_untouched_form_still_reads_as_empty(self, form):
+        """The result screen tells "race again" from "someone new" by this, and
+        the consent box always has something written in it."""
+        assert form.is_empty
+
+    def test_ticking_alone_makes_the_form_started(self, form):
+        form.focused = TERMS
+        form.handle(key(character=" "))
+        assert not form.is_empty
+
+    def test_the_label_carries_the_address_of_the_terms(self, form):
+        """It is the only place a player can see what they are agreeing to."""
+        assert "aiscmadrid.com" in form.consent.label
+
+    def test_what_the_box_shows(self):
+        box = Consent(label="TERMS")
+        assert box.value.startswith("[ ]")
+        box.toggle()
+        assert box.value.startswith("[x]")
+
+    def test_the_error_says_what_ticking_is_for(self):
+        assert consent_error(False)
+        assert consent_error(True) is None

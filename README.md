@@ -35,15 +35,19 @@ Beat your own best and the screen throws confetti at you:
 ## The second screen
 
 The laptop runs the game. A monitor facing the stand runs a **timing tower** —
-who's driving right now, their live lap clock, and how badly they're losing to
-the record.
+who's driving right now, the record, and how badly everyone is losing to it.
 
 ![The leaderboard](docs/leaderboard.png)
 
-There's a car quietly lapping the circuit behind the board at the current record
-pace, because a stand that isn't moving is a poster. Climb into the top three
-and your row slides up and lights gold. Take the record outright and the whole
-screen stops what it's doing to say so.
+It's a web page now, not a second window, and that's the interesting part: it
+is the *same* page anyone in the room gets by scanning the QR code on the
+table. One design to keep good instead of two, and what the stand is
+advertising is exactly what the room can see. On a monitor it lays itself out
+as the tower; on a phone it's a list.
+
+The laptop serves that page itself, from a copy of the last board the server
+sent. So when the venue's wifi goes away for twenty minutes — and it will —
+the biggest thing at the stand keeps showing a board instead of an error.
 
 ## Play it
 
@@ -54,8 +58,21 @@ uv sync --extra cv        # the webcam stack
 uv run python run.py
 ```
 
-That opens both windows — game and leaderboard. Drag each onto the screen it
-belongs on, press **F11** to make it fullscreen, and you're a racing team.
+That opens the game and starts the station behind it, which prints a URL.
+Open that in a browser, drag it onto the monitor facing the stand, press
+**F11**, and you're a racing team.
+
+To put the times somewhere the room can see them, write a `.env` at the top of
+the repository:
+
+```
+WHEEL_RACER_SERVER=https://racer.example.com
+WHEEL_RACER_BOOTH_TOKEN=the-token-from-the-server
+```
+
+Without it everything still works — the game plays, the board shows the stand's
+own results, and finished runs queue on disk until there is somewhere to send
+them. See [`server/README.md`](server/README.md) for the other half.
 
 No webcam handy? No problem:
 
@@ -89,8 +106,12 @@ src/wheel_racer/
   camera.py            OpenCV + MediaPipe → two wrist points
   steering.py          two wrists → one number in [-1, +1]
   render.py            the game screen
-  leaderboard.py       the timing tower
-  live.py              the file the two screens talk through
+  results.py           where a finished run goes
+  live.py              the file the game and the station talk through
+  station/             the booth's link to the server: queue, cache, kiosk
+
+web/index.html         the board, for the stand's monitor and everyone's phone
+server/                the API and the database behind it
 ```
 
 
@@ -104,10 +125,16 @@ Around 475 of them, all green, and none need a webcam.
 
 ## A note on the data
 
-The booth collects names and email addresses, so `data/` is gitignored and stays
-that way. The leaderboard shows **first names only** — a screen at a public
-stand that strangers can photograph is the last place anyone's contact details
-belong.
+The booth collects names and email addresses. Nobody drives without ticking a
+box that says so, and what they agreed to — and when — is filed with every run.
+
+The board shows **first names only**, and two people called Marta are told
+apart by an initial rather than by a surname: a screen at a public stand that
+strangers can photograph is the last place anyone's contact details belong.
+
+`data/` on the laptop is gitignored and stays that way. It holds the queue of
+runs waiting to be sent and a small roster of who has played here today, so
+that a second go five minutes later still knows what you have to beat.
 
 ---
 
