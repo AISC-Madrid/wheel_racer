@@ -12,8 +12,11 @@ both hands on a bar anyway.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import pygame
+
+from . import config
 
 NAME_LIMIT = 22
 EMAIL_LIMIT = 42
@@ -27,12 +30,79 @@ class Field:
     limit: int
     value: str = ""
 
+    caret = True
+    """Whether a blinking caret is drawn while this box has the focus."""
+
+    @property
+    def filled(self) -> bool:
+        return bool(self.value)
+
     def type(self, character: str) -> None:
         if len(self.value) < self.limit:
             self.value += character
 
     def backspace(self) -> None:
         self.value = self.value[:-1]
+
+
+@dataclass
+class Consent:
+    """The box that has to be ticked before anybody drives.
+
+    The booth keeps names and email addresses and sends them to a server, so
+    there is something to agree to, and it has to be agreed to on purpose.
+    Which is why this is a third field rather than a line of small print
+    under the panel: small print is not consent, and a queue of students
+    will walk past anything that can be walked past.
+
+    It is deliberately awkward to tick by accident. ENTER — the key everyone
+    is already pressing to get through the form — does not tick it; only the
+    space bar does. ENTER on an unticked box fails the form and says why,
+    which costs one keystroke and makes agreeing a decision rather than a
+    reflex.
+    """
+
+    label: str
+    checked: bool = False
+    accepted_at: datetime | None = None
+    """When it was ticked. Sent with every run, so that consent is
+    answerable later rather than merely asserted."""
+
+    caret = False
+
+    @property
+    def filled(self) -> bool:
+        return self.checked
+
+    @property
+    def value(self) -> str:
+        """What the box says, drawn the same way a typed field is.
+
+        A mark in the panel's own type rather than a widget: the font is
+        monospaced so it lines up under the field above it, and there is no
+        glyph here that a system font might turn into an empty square on the
+        one screen every player sees.
+        """
+        return f"[{'x' if self.checked else ' '}]  I accept the terms"
+
+    def toggle(self) -> None:
+        self.checked = not self.checked
+        # Stamped on the way in rather than read at submission time, so what
+        # gets recorded is the moment somebody agreed and not the moment they
+        # finished typing their address.
+        self.accepted_at = datetime.now(timezone.utc) if self.checked else None
+
+
+def consent_error(agreed: bool) -> str | None:
+    """Whether this run may be recorded at all.
+
+    Phrased as what the tick is for. "You must accept the terms" tells
+    somebody they are being made to do something; saying what it allows tells
+    them what they are agreeing to, in the two seconds they will spend on it.
+    """
+    if not agreed:
+        return "SPACE to accept — it is how your time gets on the board"
+    return None
 
 
 def name_error(value: str) -> str | None:
@@ -141,9 +211,10 @@ class LoginForm:
     """Name and email, and which of them the player is typing into."""
 
     def __init__(self) -> None:
-        self.fields: list[Field] = [
+        self.fields: list[Field | Consent] = [
             Field(label="NAME", limit=NAME_LIMIT),
             Field(label="EMAIL", limit=EMAIL_LIMIT),
+            Consent(label=f"TERMS  ·  {config.TERMS_URL}"),
         ]
         self.focused = 0
         self.error: str | None = None
@@ -160,17 +231,35 @@ class LoginForm:
         return self.fields[1].value.strip()
 
     @property
+    def consent(self) -> Consent:
+        return self.fields[2]
+
+    @property
+    def accepted_at(self) -> datetime | None:
+        """When the terms were agreed to, for the run about to happen."""
+        return self.consent.accepted_at
+
+    @property
     def is_empty(self) -> bool:
-        """Nothing typed yet.
+        """Nothing filled in yet.
 
         The result screen uses this to tell "race again" from "someone new is
-        signing in", so that ENTER can mean both without a second key.
+        signing in", so that ENTER can mean both without a second key. Asked
+        as `filled` rather than as `value`, because the consent box always
+        has something written in it and would otherwise make every untouched
+        form look half-started.
         """
-        return not any(f.value for f in self.fields)
+        return not any(box.filled for box in self.fields)
 
     def clear(self) -> None:
         for box in self.fields:
-            box.value = ""
+            if isinstance(box, Consent):
+                # Consent does not carry over to the next person. It is the
+                # one field here that has to be given again by whoever is
+                # about to drive.
+                box.checked, box.accepted_at = False, None
+            else:
+                box.value = ""
         self.focused = 0
         self.error = None
         self.submitted = False
@@ -188,7 +277,9 @@ class LoginForm:
         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             self._enter()
         elif event.key == pygame.K_BACKSPACE:
-            self.fields[self.focused].backspace()
+            box = self.fields[self.focused]
+            if not isinstance(box, Consent):
+                box.backspace()
             self.error = None
         else:
             self._type(event.unicode)
@@ -200,11 +291,21 @@ class LoginForm:
     def _type(self, character: str) -> None:
         if not character or not character.isprintable():
             return
+
+        box = self.fields[self.focused]
+        if isinstance(box, Consent):
+            # The space bar and nothing else, so that a stray keystroke while
+            # somebody is hunting for TAB cannot agree to anything.
+            if character == " ":
+                box.toggle()
+                self.error = None
+            return
+
         # Nobody's address contains a space, and a trailing one typed by
         # accident is invisible and would split the same person into two rows.
         if self.focused == 1 and character.isspace():
             return
-        self.fields[self.focused].type(character)
+        box.type(character)
         self.error = None
 
     def _enter(self) -> None:
@@ -215,8 +316,10 @@ class LoginForm:
         self.submit()
 
     def submit(self) -> bool:
-        """Sign in if both fields will do. Returns whether it worked."""
-        for index, check in enumerate((name_error(self.name), email_error(self.email))):
+        """Sign in if the whole form will do. Returns whether it worked."""
+        for index, check in enumerate((name_error(self.name),
+                                       email_error(self.email),
+                                       consent_error(self.consent.checked))):
             if check is not None:
                 self.focused = index
                 self.error = check

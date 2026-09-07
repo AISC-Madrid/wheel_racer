@@ -19,7 +19,9 @@ from wheel_racer import config
 from wheel_racer.display import is_fullscreen_shortcut
 from wheel_racer.game import COUNTDOWN_SECONDS, Game, State
 from wheel_racer.inputs import KeyboardInput, WristSample
-from wheel_racer.players import PlayerBook
+from wheel_racer.results import Results
+from wheel_racer.station.cache import Roster
+from wheel_racer.station.outbox import Outbox
 from wheel_racer.world import build_world
 
 DT = 1.0 / 60.0
@@ -84,10 +86,17 @@ def display():
 
 
 def build_game(display, tmp_path, **kwargs) -> Game:
-    """A game writing to a throwaway CSV, never the booth's real one."""
+    """A game writing to a throwaway queue, never the booth's real one.
+
+    No station to ask, which is the state the game has to be playable in —
+    and is what `--no-station` sets up at a stand.
+    """
     pygame.event.clear()
+    results = Results(outbox=Outbox(tmp_path / "outbox"),
+                      roster=Roster(tmp_path / "known.json"),
+                      kiosk_port=0, station="booth-test")
     instance = Game(source=KeyboardInput(), screen=display, world=build_world(),
-                    book=PlayerBook(tmp_path / "players.csv"), **kwargs)
+                    results=results, **kwargs)
     instance.source = WristAutopilot(instance)
     return instance
 
@@ -117,11 +126,19 @@ def type_text(text: str) -> None:
         press(unicode=character)
 
 
-def sign_in(game: Game, name: str = NAME, email: str = EMAIL) -> None:
-    """Fill the form the way a player would, then hand it in."""
+def sign_in(game: Game, name: str = NAME, email: str = EMAIL,
+            accept: bool = True) -> None:
+    """Fill the form the way a player would, then hand it in.
+
+    Including the terms, which is a third field and a space bar: nobody
+    drives without agreeing, so no test can sign in without it either.
+    """
     type_text(name)
     press(pygame.K_TAB)
     type_text(email)
+    if accept:
+        press(pygame.K_TAB)
+        press(unicode=" ")
     press(pygame.K_RETURN)
     game.step(DT)
 
@@ -167,7 +184,7 @@ class TestSigningIn:
         assert unsigned.form.error
 
     def test_a_returning_player_brings_their_best_time_back(self, unsigned):
-        unsigned.book.record("Lauren", EMAIL, 28.5)
+        unsigned.results.record("Lauren", EMAIL, 28.5)
         sign_in(unsigned)
         assert unsigned.personal_best == pytest.approx(28.5)
 
@@ -288,14 +305,25 @@ class TestDrivingARun:
         assert finished.state is State.ATTRACT
         assert finished.player_email == "ada@example.com"
 
-    def test_the_run_is_written_to_the_csv(self, finished):
+    def test_the_run_is_queued_for_the_server(self, finished):
         """The saved figure is the best single lap of the run, not the total —
         see `_on_lap_complete`. Stored to the hundredth, which is the
-        resolution the clock shows."""
-        stored = finished.book.get(EMAIL)
-        assert stored is not None
-        assert stored.best_seconds == pytest.approx(min(finished.splits), abs=0.005)
-        assert stored.name == NAME
+        resolution the clock shows.
+
+        It goes to a file rather than to the network, which is why this holds
+        with no station running and no wifi anywhere near.
+        """
+        (_, queued), = finished.results.outbox.pending()
+        assert queued["seconds"] == pytest.approx(min(finished.splits), abs=0.005)
+        assert queued["name"] == NAME
+        assert queued["email"] == EMAIL.strip().lower()
+
+    def test_the_consent_that_was_given_goes_with_it(self, finished):
+        """A run is only allowed to be recorded because somebody ticked the
+        box. Which box, and when, has to travel with it."""
+        (_, queued), = finished.results.outbox.pending()
+        assert queued["terms_accepted_at"]
+        assert queued["terms_version"]
 
     def test_a_first_run_always_counts_as_a_best(self, finished):
         assert finished.beat_their_best
@@ -317,11 +345,19 @@ class TestDrivingARun:
         assert game.lap_time is not None
         assert game.lap_time < sum(game.splits) + game.lap_time
 
-    def test_a_slower_second_run_is_not_a_new_best(self, game):
-        """A tie must not read as an improvement either: the file keeps
-        hundredths and the clock does not, so comparing the raw time against
-        the saved one would call the same lap an improvement on itself."""
-        game.book.record(NAME, EMAIL, 1.0)  # unbeatable
+    def test_a_slower_second_run_is_not_a_new_best(self, unsigned):
+        """A tie must not read as an improvement either: times are kept to
+        the hundredth and the clock is not, so comparing the raw time
+        against the stored one would call the same lap an improvement on
+        itself.
+
+        The record is put there before signing in, because signing in is
+        when the game asks what this player has to beat — and that answer is
+        what every result afterwards is measured against.
+        """
+        unsigned.results.record(NAME, EMAIL, 1.0)  # unbeatable
+        sign_in(unsigned)
+        game = unsigned
         press_space()
         run_for(game, COUNTDOWN_SECONDS + 0.2)
         run_for(game, 120.0, until=State.RESULT)

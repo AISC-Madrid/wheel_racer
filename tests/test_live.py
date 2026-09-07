@@ -9,6 +9,7 @@ as an exception, because the alternative is a dead screen at the stand.
 
 import json
 import time
+from dataclasses import asdict
 
 import pytest
 
@@ -171,3 +172,54 @@ class TestReadingIsCheap:
         import os
         os.utime(channel.path, (time.time() + 5, time.time() + 5))
         assert reader.read().name == "Javi"
+
+
+class TestNotWritingWhenNothingMoved:
+    """The throttle, and the drift that used to defeat it.
+
+    `clock_started_at` names a fixed instant, but it is worked out from two
+    clocks that disagree by microseconds, so compared exactly it is never the
+    same twice — and the file was being rewritten every frame instead of twice
+    a second. On Windows that is thirty times as many chances to collide with
+    the station reading the same file, which is how a booth crashed.
+    """
+
+    def test_a_lap_start_that_only_drifted_is_not_a_new_state(self, channel):
+        started = time.time()
+        channel.publish(racing(), now=100.0)
+        drifted = LiveState(state="racing", name="Marta", lap=1, laps=2,
+                            clock_started_at=started)
+        channel.publish(LiveState(**{**asdict(drifted),
+                                     "clock_started_at": started}), now=100.0)
+        # Within the same heartbeat window, so anything written here was
+        # written because the state was judged to have changed.
+        assert not channel.publish(
+            LiveState(**{**asdict(drifted),
+                         "clock_started_at": started + 0.001}), now=100.1)
+
+    def test_a_lap_that_actually_restarted_is_a_new_state(self, channel):
+        started = time.time()
+        first = LiveState(state="racing", name="Marta", lap=1, laps=2,
+                          clock_started_at=started)
+        channel.publish(first, now=100.0)
+        second = LiveState(**{**asdict(first), "clock_started_at": started + 5.0})
+        assert channel.publish(second, now=100.1)
+
+    def test_a_clock_starting_is_a_new_state(self, channel):
+        waiting = LiveState(state="ready", name="Marta")
+        channel.publish(waiting, now=100.0)
+        started = LiveState(**{**asdict(waiting), "state": "racing",
+                               "clock_started_at": time.time()})
+        assert channel.publish(started, now=100.1)
+
+    def test_a_clock_stopping_is_a_new_state(self, channel):
+        channel.publish(racing(), now=100.0)
+        stopped = LiveState(state="result", name="Marta", frozen_time=14.88)
+        assert channel.publish(stopped, now=100.1)
+
+    def test_the_heartbeat_still_gets_through(self, channel):
+        """Silence is how the other side tells an idle stand from a gone one,
+        so an unchanged state still has to be republished eventually."""
+        state = racing()
+        channel.publish(state, now=100.0)
+        assert channel.publish(state, now=100.0 + HEARTBEAT_SECONDS + 0.1)

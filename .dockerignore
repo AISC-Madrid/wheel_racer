@@ -1,0 +1,18 @@
+# The container gets the server, the page and the logo. Nothing else.
+#
+# `data/` is the important line: it is where the booth keeps names, addresses
+# and queued runs, and none of that may ever end up in an image.
+data/
+.env
+.venv/
+.git/
+__pycache__/
+*.pyc
+docs/
+tools/
+tests/
+src/
+uv.lock
+run.py
+station.py
+PROJECT.md

@@ -34,7 +34,7 @@ from .inputs import InputSource, PreviewFrame
 from .laptimer import LapTimer
 from .live import LiveChannel, LiveState
 from .login import LoginForm
-from .players import PlayerBook, normalise_email
+from .results import Results, normalise_email
 from .recovery import RecoveryMonitor
 from .render import Renderer, format_time
 from .steering import SteeringFilter
@@ -80,7 +80,7 @@ class Game:
         screen: pygame.Surface,
         world: World,
         auto_start: bool = False,
-        book: PlayerBook | None = None,
+        results: Results | None = None,
         fullscreen: bool = False,
         live: LiveChannel | None = None,
     ) -> None:
@@ -118,7 +118,10 @@ class Game:
 
         # Signing in is what the booth is actually collecting, so it gates
         # play: there is no way into a run that does not go through the form.
-        self.book = book if book is not None else PlayerBook()
+        #
+        # Saving is a file write and nothing more — the station sends it on
+        # when it can. Nothing on the finish line waits for a network.
+        self.results = results if results is not None else Results()
         # Where the second screen reads from. Optional, and deliberately
         # write-only from here: the game never asks the leaderboard anything,
         # so the leaderboard can be absent, crashed or restarted mid-afternoon
@@ -127,6 +130,7 @@ class Game:
         self.form = LoginForm()
         self.player_name = ""
         self.player_email = ""
+        self.terms_accepted_at = None
         self.personal_best: float | None = None
         self.beat_their_best = False
 
@@ -251,7 +255,15 @@ class Game:
         """
         self.player_name = self.form.name
         self.player_email = normalise_email(self.form.email)
-        self.personal_best = self.book.best_for(self.player_email)
+        # Read before the form is cleared, and kept for the run itself: what
+        # gets filed with the result is the moment this person agreed, not
+        # the moment they crossed the line.
+        self.terms_accepted_at = self.form.accepted_at
+        # The one place the game waits on anything. The station answers from
+        # its own cache for anybody who has played here today, and only goes
+        # to the server for somebody it has never seen; if nothing answers,
+        # they are treated as new, which costs them a line on a screen.
+        self.personal_best = self.results.best_for(self.player_email)
         self.form.clear()
         self.splits = []
         self.state = State.ATTRACT
@@ -340,12 +352,14 @@ class Game:
         if self.best_run is None or best_lap < self.best_run:
             self.best_run = best_lap
 
-        # Asked before the save, because "did they beat it" is exactly "did
-        # the stored value move". Comparing the raw time against the saved one
-        # instead would call a tie a personal best, since the file keeps
-        # hundredths and the clock does not.
-        previous = self.book.best_for(self.player_email)
-        stored = self.book.record(self.player_name, self.player_email, best_lap)
+        # What they had to beat, as it was known when they signed in and
+        # after every run since. Held rather than asked for again: asking
+        # would put a network call between the finish line and the result
+        # screen, and "did they beat it" is exactly "did the value we were
+        # showing them move".
+        previous = self.personal_best
+        stored = self.results.record(self.player_name, self.player_email,
+                                     best_lap, self.terms_accepted_at)
         self.beat_their_best = previous is None or stored.best_seconds < previous
         self.personal_best = stored.best_seconds
 

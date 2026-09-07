@@ -1,8 +1,14 @@
 """Start the stand.
 
-One command brings up both screens: the game, and the leaderboard on the other
-monitor. They are still two separate processes with two separate windows — drag
-either onto whichever display it belongs on, then press F11 to fill it.
+One command brings up the game and the station behind it. The station is what
+sends results to the server and what serves the board to the screen facing the
+stand — open the URL it prints in a browser, drag it onto that monitor, and
+press F11.
+
+The second screen used to be a second pygame window. It is a browser now, for
+one reason: the board it shows is the same page every visitor gets on their
+phone, so there is one design to keep good instead of two, and what the stand
+is advertising is exactly what the room can see.
 """
 
 from __future__ import annotations
@@ -10,6 +16,8 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
@@ -17,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from wheel_racer import config  # noqa: E402
 from wheel_racer.game import start  # noqa: E402
 from wheel_racer.inputs import InputSource, KeyboardInput  # noqa: E402
+from wheel_racer.station.config import settings as station_settings  # noqa: E402
 
 
 def open_camera(args: argparse.Namespace) -> InputSource:
@@ -54,34 +63,51 @@ def build_source(args: argparse.Namespace) -> tuple[InputSource, bool]:
         return KeyboardInput(), False
 
 
-def open_leaderboard(display: int) -> subprocess.Popen | None:
-    """Start the second screen alongside the game.
+def station_is_up(port: int) -> bool:
+    """Whether something is already serving the booth on this port.
 
-    A child process rather than a second window in this one, so the two screens
-    stay genuinely independent: the leaderboard can be closed and reopened by
-    hand all afternoon, and if it falls over it takes nothing with it. The only
-    thing tying them together is that closing the game closes the board too,
-    which is what you want at the end of the day and never notice before it.
+    Checked rather than assumed, because a station started by hand — to watch
+    the queue drain, or to work on the board — must not be shut down by opening
+    the game, and two of them cannot have the port anyway.
+    """
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/booth/status", timeout=1.0):
+            return True
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return False
+
+
+def open_station(open_board: bool) -> subprocess.Popen | None:
+    """Start the station alongside the game, unless one is already running.
+
+    A child process rather than a thread in this one, for the reason the
+    leaderboard used to be: the two stay genuinely independent, and a station
+    that falls over mid-afternoon takes nothing with it. Results are on disk
+    the moment they happen, so even the worst case here costs delivery time
+    rather than anybody's lap.
 
     A failure to start is reported and then ignored. The booth's job is to let
-    people drive; a missing second screen is a worse afternoon, not a lost one.
+    people drive.
     """
-    script = Path(__file__).resolve().parent / "leaderboard.py"
+    script = Path(__file__).resolve().parent / "station.py"
+    command = [sys.executable, str(script)]
+    if open_board:
+        command.append("--open")
     try:
-        return subprocess.Popen([sys.executable, str(script),
-                                 "--display", str(display)])
+        return subprocess.Popen(command)
     except OSError as error:
-        print(f"could not start the leaderboard: {error}", file=sys.stderr)
+        print(f"could not start the station: {error}", file=sys.stderr)
         return None
 
 
-def close_leaderboard(child: subprocess.Popen | None) -> None:
-    """Ask the second screen to go, and wait long enough to be sure it did.
+def close_station(child: subprocess.Popen | None) -> None:
+    """Ask the station to go, and wait long enough to be sure it did.
 
-    Without the wait, quitting the game leaves the board on the monitor for as
-    long as it takes to notice — which at a stand looks like the thing has
-    hung. If it has not gone by then it is not going to, so it is killed
-    outright rather than left behind on somebody's screen overnight.
+    The wait matters more than it looks: on the way out the station takes this
+    stand off the live column, so a queue of five seconds here is what stops
+    the public board claiming somebody is driving at a stand that has packed
+    up and gone home.
     """
     if child is None or child.poll() is not None:
         return
@@ -108,21 +134,22 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=config.WINDOW_HEIGHT)
     parser.add_argument("--fullscreen", action="store_true",
                         help="open at the desktop resolution (F11 toggles in game)")
-    parser.add_argument("--no-leaderboard", action="store_true",
-                        help="do not open the second screen")
-    parser.add_argument("--leaderboard-display", type=int, default=1,
-                        help="which monitor the leaderboard opens on (default 1)")
+    parser.add_argument("--no-station", action="store_true",
+                        help="do not start the station (no board, no sending)")
+    parser.add_argument("--open-board", action="store_true",
+                        help="open the board in a browser once the station is up")
     args = parser.parse_args()
 
     source, using_camera = build_source(args)
     print(f"Input: {'camera' if using_camera else 'keyboard'}")
 
-    leaderboard = None
-    if not args.no_leaderboard:
-        leaderboard = open_leaderboard(args.leaderboard_display)
-        if leaderboard is not None:
-            print("Leaderboard: opened in its own window — drag it to the "
-                  "monitor, then press F11")
+    port = station_settings().port
+    station = None
+    if not args.no_station:
+        if station_is_up(port):
+            print(f"Station: already running — board at http://127.0.0.1:{port}/")
+        else:
+            station = open_station(args.open_board)
 
     try:
         start(
@@ -136,11 +163,10 @@ def main() -> None:
             auto_start=using_camera,
         )
     finally:
-        # In a `finally` rather than an `atexit` hook, so the board also goes
-        # when the game comes down the unhappy way. A booth laptop left showing
-        # a frozen leaderboard next to a crashed game is a worse look than
-        # showing nothing at all.
-        close_leaderboard(leaderboard)
+        # In a `finally` rather than an `atexit` hook, so the station also goes
+        # when the game comes down the unhappy way — and gets its chance to
+        # clear this stand off the live column on the way.
+        close_station(station)
 
 
 if __name__ == "__main__":

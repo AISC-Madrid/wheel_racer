@@ -13,6 +13,17 @@ The tuning order that actually works, from PROJECT.md:
   3. Tune steering feel last, once the car is drivable.
 """
 
+# --- Signing in -------------------------------------------------------------
+
+# The terms a player agrees to before driving. Shown on the sign-in panel and
+# sent with every run, so that "who agreed to what" has an answer later.
+#
+# The version is ours, not the page's. Change it whenever the text at that URL
+# changes in a way that matters, and every run filed afterwards carries the new
+# one — which is the only way to tell later who agreed to which wording.
+TERMS_URL = "aiscmadrid.com/terms_conditions.php"
+TERMS_VERSION = "2026-01"
+
 # --- Window -----------------------------------------------------------------
 
 # The size the window opens at, not a size the game is tied to. The circuit is

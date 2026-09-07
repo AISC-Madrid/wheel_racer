@@ -539,7 +539,10 @@ class Renderer:
             inset = round(12 * self.scale)
             self.screen.blit(value, (rect.left + inset,
                                      rect.centery - value.get_height() // 2))
-            if focused and self._caret_is_showing():
+            # The consent box has no caret: it is not typed into, and a
+            # blinking cursor in front of a tick reads as an invitation to
+            # write something.
+            if focused and box.caret and self._caret_is_showing():
                 caret = rect.left + inset + value.get_width() + round(2 * self.scale)
                 pygame.draw.line(self.screen, TEXT,
                                  (caret, rect.top + inset // 2),
@@ -613,6 +616,9 @@ class Renderer:
              + (self._replay_icon_size() + round(9 * self.scale) if replay else 0))
             if hint else 0,
             self.font_body.size(form.error)[0] if form.error else 0,
+            # The labels too, since one of them carries the address of the
+            # terms and is longer than anything else on the panel.
+            *(self.font_label.size(box.label)[0] for box in form.fields),
         ]
         return max(round(LOGIN_WIDTH * self.scale), max(lines) + 2 * pad)
 

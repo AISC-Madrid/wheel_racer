@@ -1,0 +1,8 @@
+# What the container installs.
+#
+# Pinned to minor versions here and left as ranges in the root `pyproject.toml`,
+# on purpose: a deployment wants to install the same thing today and in March,
+# and a developer working on the game wants whatever they already have. Keep the
+# two roughly in step — this file is the one that decides what actually runs.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
